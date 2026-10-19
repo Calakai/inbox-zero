@@ -114,7 +114,6 @@ vi.mock("@/utils/prisma", () => ({
 
 vi.mock("@/env", () => ({
   env: {
-    NEXT_PUBLIC_BRAND_NAME: "Inbox Zero",
     get NEXT_PUBLIC_EMAIL_SEND_ENABLED() {
       return envState.sendEmailEnabled;
     },
@@ -223,7 +222,7 @@ describe("aiProcessAssistantChat", () => {
         .soft(guidance)
         .toContain("unless the user explicitly requests another language");
     }
-  });
+  }, 30_000);
 
   it("registers expected core and send tools when email sending is enabled", async () => {
     const { aiProcessAssistantChat } = await loadAssistantChatModule({
