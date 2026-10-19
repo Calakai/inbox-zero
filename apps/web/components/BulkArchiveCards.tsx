@@ -387,7 +387,7 @@ export function BulkArchiveCards({
               role="button"
               tabIndex={0}
             >
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-3">
                 <div className="flex items-center gap-3">
                   <div
                     className={cn(
@@ -417,7 +417,7 @@ export function BulkArchiveCards({
                       {categoryName}
                     </h2>
                     {held ? (
-                      <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                      <p className="flex items-center gap-1.5 whitespace-nowrap text-sm text-muted-foreground">
                         <CheckIcon className="size-4 text-green-600 dark:text-green-500" />
                         <span>
                           <span className="tabular-nums">{held.count}</span>{" "}
@@ -425,8 +425,8 @@ export function BulkArchiveCards({
                         </span>
                       </p>
                     ) : (
-                      <p className="text-sm text-muted-foreground">
-                        <span className="whitespace-nowrap">
+                      <p className="whitespace-nowrap text-sm text-muted-foreground">
+                        <span>
                           <span className="tabular-nums">{stats.inbox}</span> in
                           inbox ·
                         </span>{" "}
@@ -438,7 +438,7 @@ export function BulkArchiveCards({
                     )}
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="ml-auto flex items-center gap-3">
                   {isArchived ? (
                     <div className="flex items-center gap-2 text-green-600">
                       <CheckIcon className="size-5" />

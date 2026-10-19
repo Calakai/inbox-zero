@@ -274,6 +274,9 @@ test("holds the archived result with Undo and moves the header number", async ({
     "bulk-archive-counts-archived",
   );
 
+  // The result lives in the header and the row; no second "complete" bar.
+  await expect(page.getByText(/senders processed/)).toHaveCount(0);
+
   // The refetch after the archive finishes keeps the held result and the number.
   await expect(newsletterCard(page)).toContainText("2 archived", {
     timeout: 30_000,
