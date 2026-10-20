@@ -77,6 +77,15 @@ export function BulkArchive() {
         )
       : fetchedInboxCount;
 
+  // Unread mail leaves with the categories archived this session.
+  const unreadCount = senders.reduce(
+    (total, sender) =>
+      sender.category && heldArchives[sender.category.name]
+        ? total
+        : total + sender.counts.unread,
+    0,
+  );
+
   const holdArchive = (categoryName: string, held: HeldArchive) =>
     setArchivedThisSession((previous) => ({
       baseline: previous?.baseline ?? fetchedInboxCount,
@@ -139,6 +148,7 @@ export function BulkArchive() {
         </div>
         <BulkArchiveSummary
           inboxCount={inboxCount}
+          unreadCount={Math.min(unreadCount, inboxCount)}
           baselineCount={archivedThisSession?.baseline}
           archivedCount={archivedCount}
           fetchedAt={data?.fetchedAt}
