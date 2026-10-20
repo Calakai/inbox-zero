@@ -1,21 +1,29 @@
 import { describe, expect, it } from "vitest";
+import { SafeError } from "@/utils/error";
 import { getStreamErrorText } from "./stream-error-text";
 
 describe("getStreamErrorText", () => {
-  it("keeps the first line of the real error", () => {
-    expect(getStreamErrorText(new Error("Search failed: 429\nstack"))).toBe(
-      "Search failed: 429",
+  it("passes a SafeError message through", () => {
+    expect(getStreamErrorText(new SafeError("Account not found", 404))).toBe(
+      "Account not found",
     );
   });
 
-  it("redacts credentials", () => {
-    expect(
-      getStreamErrorText(new Error("bad call https://u:pw@host key=abc123")),
-    ).toBe("bad call https://[redacted]@host key=[redacted]");
+  it("never sends the message of a non-SafeError, only name and status", () => {
+    const error = Object.assign(
+      new TypeError("bad call https://u:pw@host/path?key=abc to provider"),
+      { statusCode: 429 },
+    );
+    expect(getStreamErrorText(error)).toBe("TypeError (status 429)");
   });
 
-  it("falls back for non-errors and empty messages", () => {
+  it("uses a generic label for a plain Error", () => {
+    const text = getStreamErrorText(new Error("secret detail"));
+    expect(text).toBe("Request failed");
+    expect(text).not.toContain("secret");
+  });
+
+  it("falls back for non-errors", () => {
     expect(getStreamErrorText("boom")).toBe("An error occurred");
-    expect(getStreamErrorText(new Error("\n"))).toBe("An error occurred");
   });
 });
