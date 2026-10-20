@@ -68,9 +68,10 @@ describe("BulkArchiveSummary", () => {
       />,
     );
 
-    expect(
-      (screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
+    const button = screen.getByRole("button", {
+      name: "Refreshing…",
+    }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("aria-busy")).toBe("true");
   });
 });

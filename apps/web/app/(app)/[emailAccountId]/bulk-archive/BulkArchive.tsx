@@ -101,6 +101,17 @@ export function BulkArchive() {
         : undefined;
     });
 
+  const [refreshing, setRefreshing] = useState(false);
+  const handleRefresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await Promise.all([mutate(), new Promise((r) => setTimeout(r, 700))]);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   const handleProgressComplete = useCallback(() => {
     analytics.captureAction("bulk_archive_categorization_completed");
     mutate();
@@ -152,8 +163,8 @@ export function BulkArchive() {
           baselineCount={archivedThisSession?.baseline}
           archivedCount={archivedCount}
           fetchedAt={data?.fetchedAt}
-          isRefreshing={isValidating}
-          onRefresh={() => mutate()}
+          isRefreshing={refreshing || isValidating}
+          onRefresh={handleRefresh}
         />
         <BulkArchiveProgress onComplete={handleProgressComplete} />
         <BulkArchiveCards

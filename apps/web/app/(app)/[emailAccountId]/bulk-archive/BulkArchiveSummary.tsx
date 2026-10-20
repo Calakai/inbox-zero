@@ -48,12 +48,13 @@ export function BulkArchiveSummary({
         )}
       </div>
       <div className="flex items-center gap-3">
-        {fetchedAt && <UpdatedAgo at={fetchedAt} />}
+        {fetchedAt && <UpdatedAgo key={fetchedAt} at={fetchedAt} />}
         <Button
           variant="outline"
           size="sm"
           onClick={onRefresh}
           disabled={isRefreshing}
+          aria-busy={isRefreshing}
         >
           <RefreshCwIcon
             className={cn(
@@ -61,7 +62,7 @@ export function BulkArchiveSummary({
               isRefreshing && "animate-spin motion-reduce:animate-none",
             )}
           />
-          Refresh
+          {isRefreshing ? "Refreshing…" : "Refresh"}
         </Button>
       </div>
     </div>
