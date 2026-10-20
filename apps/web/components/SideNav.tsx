@@ -300,9 +300,17 @@ export function SideNav({
       <SidebarHeader className="gap-0 pb-0">
         {state.includes("left-sidebar") ? (
           <div className="flex items-center rounded-md pl-2 pr-0.5 py-3 text-foreground">
-            <Link href={navigation.homeHref} data-hide-on-desktop-mac>
-              <Logo className="h-3.5" />
-            </Link>
+            <div
+              className="flex min-w-0 flex-col gap-1"
+              data-hide-on-desktop-mac
+            >
+              <Link href={navigation.homeHref}>
+                <Logo className="h-3.5" />
+              </Link>
+              <span className="truncate text-sm text-sidebar-primary">
+                Pure Local
+              </span>
+            </div>
             <SidebarTrigger name="left-sidebar" className="ml-auto" />
           </div>
         ) : (
