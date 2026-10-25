@@ -21,11 +21,23 @@ export const GET = withError("outlook/watch/claim", async (request) => {
 
   const results = [];
   for (const { id: emailAccountId } of emailAccounts) {
-    const claim = await checkMailboxClaim({
-      emailAccountId,
-      logger: request.logger,
-    });
-    results.push({ emailAccountId, ...claim });
+    try {
+      const claim = await checkMailboxClaim({
+        emailAccountId,
+        logger: request.logger,
+      });
+      results.push({ emailAccountId, ...claim });
+    } catch (error) {
+      request.logger.error("Failed to check mailbox claim", {
+        emailAccountId,
+        error,
+      });
+      results.push({
+        emailAccountId,
+        status: "error" as const,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   return NextResponse.json({ results });

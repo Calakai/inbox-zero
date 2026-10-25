@@ -242,6 +242,8 @@ import sys, json
 for r in json.load(sys.stdin).get("results", []):
     if r.get("status") == "owner":
         print("mailbox:  owned by this copy")
+    elif r.get("status") == "error":
+        print("mailbox:  could not check ownership: " + r.get("error", ""))
     else:
         print("mailbox:  STANDBY, owned by " + ", ".join(r.get("ownerHosts", [])) + " (inbox start --takeover moves it here)")'
 }
