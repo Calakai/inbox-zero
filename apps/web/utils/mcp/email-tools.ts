@@ -10,6 +10,10 @@ import {
   type OutlookFolder,
 } from "@/utils/outlook/folders";
 import { checkRateLimit, createRateLimitKey } from "@/utils/rate-limit";
+import {
+  markFolderHeldMail,
+  wasFolderRecentlyHeldMail,
+} from "@/utils/redis/mcp-folder-held-mail";
 import { textToHtmlParagraphs } from "@/utils/string";
 import type { EmailProvider } from "@/utils/email/types";
 import type { Logger } from "@/utils/logger";
@@ -133,7 +137,7 @@ export const runRulesInputShape = {
 
 export const listFoldersInputShape = mcpAccountSelectorShape;
 
-export const deleteFolderInputShape = {
+const folderInputShape = {
   ...mcpAccountSelectorShape,
   folderId: z
     .string()
@@ -144,9 +148,19 @@ export const deleteFolderInputShape = {
     ),
 };
 
-export const archiveFolderInputShape = deleteFolderInputShape;
+export const archiveFolderInputShape = folderInputShape;
 
-export const moveFolderToInboxInputShape = deleteFolderInputShape;
+export const moveFolderToInboxInputShape = folderInputShape;
+
+export const deleteFolderInputShape = {
+  ...folderInputShape,
+  userConfirmed: z
+    .boolean()
+    .optional()
+    .describe(
+      "Set true only after the user has said yes to deleting this folder; the client may ask the user to approve the call. Required when the folder held email or subfolders until recently.",
+    ),
+};
 
 export async function searchInboxForMcp({
   userId,
@@ -429,12 +443,14 @@ export async function listFoldersForMcp({
 export async function deleteFolderForMcp({
   userId,
   folderId,
+  userConfirmed,
   emailAccountId,
   emailAddress,
   logger,
 }: {
   userId: string;
   folderId: string;
+  userConfirmed?: boolean;
   emailAccountId?: string;
   emailAddress?: string;
   logger: Logger;
@@ -453,6 +469,20 @@ export async function deleteFolderForMcp({
   // list_folders still cannot delete mail along with a folder.
   const blocker = getFolderDeleteBlocker(folder);
   if (blocker) throw new Error(`Not deleted: "${folder.path}" ${blocker}.`);
+
+  // A model can empty a folder and delete it in one go, so a folder that held
+  // mail until recently needs the user's yes, which the client collects.
+  if (
+    userConfirmed !== true &&
+    (await wasFolderRecentlyHeldMail({
+      emailAccountId: emailAccount.id,
+      folderId: folder.id,
+      logger,
+    }))
+  )
+    throw new Error(
+      `Not deleted: "${folder.path}" held email or subfolders until recently (now moved). Ask the user first; delete it only after they say yes, by calling delete_folder again with userConfirmed: true.`,
+    );
 
   const budget = await checkRateLimit({
     rule: {
@@ -473,6 +503,16 @@ export async function deleteFolderForMcp({
 
   await emailProvider.deleteFolder(folder.id);
   logger.info("Deleted empty folder via MCP", { folderId: folder.id });
+
+  const parent = folders.find((candidate) =>
+    candidate.childFolders.some((child) => child.id === folder.id),
+  );
+  if (parent)
+    await markFolderHeldMail({
+      emailAccountId: emailAccount.id,
+      folderId: parent.id,
+      logger,
+    });
 
   return {
     emailAccount,
@@ -534,6 +574,12 @@ export async function archiveFolderForMcp({
     archived,
     failedThreads: failed.size,
   });
+  if (archived > 0)
+    await markFolderHeldMail({
+      emailAccountId: emailAccount.id,
+      folderId: folder.id,
+      logger,
+    });
 
   return {
     emailAccount,
@@ -605,6 +651,12 @@ export async function moveFolderToInboxForMcp({
     moved,
     failed: messages.length - moved,
   });
+  if (moved > 0)
+    await markFolderHeldMail({
+      emailAccountId: emailAccount.id,
+      folderId: folder.id,
+      logger,
+    });
 
   return {
     emailAccount,
