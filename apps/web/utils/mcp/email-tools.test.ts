@@ -5,6 +5,7 @@ import { createTestLogger } from "@/__tests__/helpers";
 import type { OutlookFolder } from "@/utils/outlook/folders";
 import type { ParsedMessage } from "@/utils/types";
 import { runRulesOnMessage } from "@/utils/ai/choose-rule/run-rules-on-message";
+import { checkRateLimit, createRateLimitKey } from "@/utils/rate-limit";
 import {
   archiveFolderForMcp,
   createDraftForMcp,
@@ -21,6 +22,10 @@ vi.mock("server-only", () => ({}));
 vi.mock("@/utils/email/provider");
 vi.mock("@/utils/ai/choose-rule/run-rules-on-message", () => ({
   runRulesOnMessage: vi.fn(),
+}));
+vi.mock("@/utils/rate-limit", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/utils/rate-limit")>()),
+  checkRateLimit: vi.fn(),
 }));
 vi.mock("@/utils/mcp/account-selection", () => ({
   resolveMcpEmailAccount: vi.fn(),
@@ -58,6 +63,11 @@ describe("MCP email tools", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(resolveMcpEmailAccount).mockResolvedValue(emailAccount);
+    vi.mocked(checkRateLimit).mockResolvedValue({
+      limited: false,
+      limit: 2,
+      remaining: 1,
+    });
   });
 
   it("returns search metadata without message bodies", async () => {
@@ -436,6 +446,21 @@ describe("MCP email tools", () => {
         deleteFolderForMcp({ userId: "user_1", folderId, logger }),
       ).rejects.toThrow(message);
       expect(deleteFolder).not.toHaveBeenCalled();
+      expect(checkRateLimit).not.toHaveBeenCalled();
+    });
+
+    it("stops deleting folders once the limit is reached", async () => {
+      const { deleteFolder } = mockOutlook();
+      vi.mocked(checkRateLimit).mockResolvedValue({
+        limited: true,
+        limit: 2,
+        retryAfterSeconds: 600,
+      });
+
+      await expect(
+        deleteFolderForMcp({ userId: "user_1", folderId: "old", logger }),
+      ).rejects.toThrow("At most 2 folders");
+      expect(deleteFolder).not.toHaveBeenCalled();
     });
 
     it("deletes an empty custom folder", async () => {
@@ -449,6 +474,18 @@ describe("MCP email tools", () => {
 
       expect(deleteFolder).toHaveBeenCalledWith("old");
       expect(result).toMatchObject({ path: "Projects ⦙ Old", deleted: true });
+
+      const { rule } = vi.mocked(checkRateLimit).mock.calls[0][0];
+      expect(rule.limit).toBe(2);
+      expect(rule.windowSeconds).toBe(600);
+      expect(rule.key).toBe(
+        createRateLimitKey([
+          "rate-limit",
+          "mcp",
+          "folder-delete",
+          outlookAccount.id,
+        ]),
+      );
     });
 
     it("refuses Gmail accounts before touching the mailbox", async () => {

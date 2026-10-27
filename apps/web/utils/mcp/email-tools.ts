@@ -8,6 +8,7 @@ import {
   flattenOutlookFolders,
   type OutlookFolder,
 } from "@/utils/outlook/folders";
+import { checkRateLimit, createRateLimitKey } from "@/utils/rate-limit";
 import { textToHtmlParagraphs } from "@/utils/string";
 import type { Logger } from "@/utils/logger";
 import type { ParsedMessage } from "@/utils/types";
@@ -17,6 +18,9 @@ const READ_THREAD_MAX_MESSAGES = 20;
 const READ_MESSAGE_MAX_LENGTH = 4000;
 const LABEL_NAMES_IN_ERROR = 50;
 const ARCHIVE_FOLDER_MAX_MESSAGES = 1000;
+// Each delete takes one call, so a model that misreads a vague follow-up can
+// walk the whole folder list; the cap stops it after a couple.
+const FOLDER_DELETE_LIMIT = { limit: 2, windowSeconds: 10 * 60 };
 
 export const mcpAccountSelectorShape = {
   emailAccountId: z.string().optional(),
@@ -436,6 +440,23 @@ export async function deleteFolderForMcp({
   // list_folders still cannot delete mail along with a folder.
   const blocker = getFolderDeleteBlocker(folder);
   if (blocker) throw new Error(`Not deleted: "${folder.path}" ${blocker}.`);
+
+  const budget = await checkRateLimit({
+    rule: {
+      key: createRateLimitKey([
+        "rate-limit",
+        "mcp",
+        "folder-delete",
+        emailAccount.id,
+      ]),
+      ...FOLDER_DELETE_LIMIT,
+    },
+    logger,
+  });
+  if (budget.limited)
+    throw new Error(
+      `Not deleted: "${folder.path}". At most ${FOLDER_DELETE_LIMIT.limit} folders can be deleted every ${FOLDER_DELETE_LIMIT.windowSeconds / 60} minutes. Tell the user which folders are left; they can delete them in Outlook or ask again later.`,
+    );
 
   await emailProvider.deleteFolder(folder.id);
   logger.info("Deleted empty folder via MCP", { folderId: folder.id });
