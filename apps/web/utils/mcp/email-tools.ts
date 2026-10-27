@@ -12,6 +12,7 @@ import {
 import { checkRateLimit, createRateLimitKey } from "@/utils/rate-limit";
 import {
   markFolderHeldMail,
+  markFoldersSeenHoldingMail,
   wasFolderRecentlyHeldMail,
 } from "@/utils/redis/mcp-folder-held-mail";
 import { textToHtmlParagraphs } from "@/utils/string";
@@ -210,6 +211,26 @@ export async function searchInboxForMcp({
     folderId: folder?.id,
     maxResults: maxResults ?? 10,
     pageToken,
+  });
+
+  // Seeing mail in a folder is how a model finds what to remove one by one,
+  // whether it searched that folder or the whole mailbox. A whole-mailbox hit
+  // may sit in a system folder; delete_folder refuses those anyway.
+  const seenFolderIds = folder
+    ? folder.systemType || searchResult.messages.length === 0
+      ? []
+      : [folder.id]
+    : [
+        ...new Set(
+          searchResult.messages.flatMap(({ parentFolderId }) =>
+            parentFolderId ? [parentFolderId] : [],
+          ),
+        ),
+      ];
+  await markFoldersSeenHoldingMail({
+    emailAccountId: emailAccount.id,
+    folderIds: seenFolderIds,
+    logger,
   });
 
   return {
@@ -422,6 +443,12 @@ export async function listFoldersForMcp({
     logger,
   });
 
+  await markFoldersSeenHoldingMail({
+    emailAccountId: emailAccount.id,
+    folderIds: folders.filter(isCustomFolderWithContent).map(({ id }) => id),
+    logger,
+  });
+
   return {
     emailAccount,
     folders: folders.map((folder) => {
@@ -468,7 +495,16 @@ export async function deleteFolderForMcp({
   // Enforced here rather than in the tool description, so a client that skips
   // list_folders still cannot delete mail along with a folder.
   const blocker = getFolderDeleteBlocker(folder);
-  if (blocker) throw new Error(`Not deleted: "${folder.path}" ${blocker}.`);
+  if (blocker) {
+    // It refuses anyway, so a lost record changes nothing here.
+    if (isCustomFolderWithContent(folder))
+      await markFoldersSeenHoldingMail({
+        emailAccountId: emailAccount.id,
+        folderIds: [folder.id],
+        logger,
+      });
+    throw new Error(`Not deleted: "${folder.path}" ${blocker}.`);
+  }
 
   // A model can empty a folder and delete it in one go, so a folder that held
   // mail until recently needs the user's yes, which the client collects.
@@ -811,6 +847,13 @@ function getFolderDeleteBlocker(folder: OutlookFolder) {
   if (subfolders > 0)
     return `has ${subfolders} subfolder${subfolders === 1 ? "" : "s"}; delete those first`;
   return null;
+}
+
+function isCustomFolderWithContent(folder: OutlookFolder) {
+  return (
+    !folder.systemType &&
+    ((folder.totalItemCount ?? 0) > 0 || subfolderCount(folder) > 0)
+  );
 }
 
 function subfolderCount(folder: OutlookFolder) {
