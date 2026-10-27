@@ -5,7 +5,7 @@ import { createTestLogger } from "@/__tests__/helpers";
 import type { OutlookFolder } from "@/utils/outlook/folders";
 import type { ParsedMessage } from "@/utils/types";
 import { runRulesOnMessage } from "@/utils/ai/choose-rule/run-rules-on-message";
-import { checkRateLimit } from "@/utils/rate-limit";
+import { checkRateLimit, createRateLimitKey } from "@/utils/rate-limit";
 import {
   archiveFolderForMcp,
   createDraftForMcp,
@@ -474,6 +474,18 @@ describe("MCP email tools", () => {
 
       expect(deleteFolder).toHaveBeenCalledWith("old");
       expect(result).toMatchObject({ path: "Projects ⦙ Old", deleted: true });
+
+      const { rule } = vi.mocked(checkRateLimit).mock.calls[0][0];
+      expect(rule.limit).toBe(2);
+      expect(rule.windowSeconds).toBe(600);
+      expect(rule.key).toBe(
+        createRateLimitKey([
+          "rate-limit",
+          "mcp",
+          "folder-delete",
+          outlookAccount.id,
+        ]),
+      );
     });
 
     it("refuses Gmail accounts before touching the mailbox", async () => {
