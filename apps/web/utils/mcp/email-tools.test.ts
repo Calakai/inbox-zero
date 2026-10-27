@@ -796,6 +796,178 @@ describe("MCP email tools", () => {
         ).rejects.toThrow("system folder");
       });
 
+      describe("folders the server has seen holding mail", () => {
+        const heldKey = (folderId: string) =>
+          createRateLimitKey([
+            "mcp",
+            "folder-held-mail",
+            outlookAccount.id,
+            createHash("sha256").update(folderId).digest("hex"),
+          ]);
+        const recordedKeys = () =>
+          vi.mocked(redis.set).mock.calls.map(([key]) => key);
+
+        it("records every non-empty custom folder when list_folders shows it", async () => {
+          mockOutlook();
+
+          await listFoldersForMcp({ userId: "user_1", logger });
+
+          expect(recordedKeys().sort()).toEqual(
+            [heldKey("projects"), heldKey("receipts")].sort(),
+          );
+          for (const [, , options] of vi.mocked(redis.set).mock.calls)
+            expect(options).toEqual({ ex: 24 * 60 * 60 });
+        });
+
+        it("skips empty and system folders when listing", async () => {
+          mockOutlook([
+            folder({ id: "inbox", displayName: "Inbox", systemType: "INBOX" }),
+            folder({
+              id: "sent",
+              displayName: "Sent",
+              systemType: "SENT",
+              totalItemCount: 40,
+            }),
+            folder({ id: "empty", displayName: "Empty" }),
+          ]);
+
+          await listFoldersForMcp({ userId: "user_1", logger });
+
+          expect(redis.set).not.toHaveBeenCalled();
+        });
+
+        it("records a folder when search_inbox finds mail in it", async () => {
+          mockOutlook();
+
+          await searchInboxForMcp({
+            userId: "user_1",
+            folderId: "Receipts",
+            logger,
+          });
+
+          expect(recordedKeys()).toEqual([heldKey("receipts")]);
+        });
+
+        it("does not record a folder when the search finds nothing or it is a system folder", async () => {
+          const empty = mockOutlook();
+          empty.searchMessages.mockReset().mockResolvedValue({ messages: [] });
+          await searchInboxForMcp({
+            userId: "user_1",
+            folderId: "Receipts",
+            logger,
+          });
+
+          mockOutlook();
+          await searchInboxForMcp({
+            userId: "user_1",
+            folderId: "Inbox",
+            logger,
+          });
+
+          expect(redis.set).not.toHaveBeenCalled();
+        });
+
+        it("does not record anything for a search without a folder", async () => {
+          mockOutlook();
+
+          await searchInboxForMcp({ userId: "user_1", query: "sale", logger });
+
+          expect(redis.set).not.toHaveBeenCalled();
+        });
+
+        it("refuses to delete a folder emptied one email at a time with update_thread", async () => {
+          mockOutlook();
+          await listFoldersForMcp({ userId: "user_1", logger });
+          vi.mocked(createEmailProvider).mockResolvedValue({
+            trashThread: vi.fn().mockResolvedValue(undefined),
+          } as never);
+          await updateThreadForMcp({
+            userId: "user_1",
+            threadId: "ta",
+            action: "trash",
+            logger,
+          });
+          const { deleteFolder } = mockOutlook([
+            folder({ id: "receipts", displayName: "Receipts" }),
+          ]);
+
+          await expect(
+            deleteFolderForMcp({
+              userId: "user_1",
+              folderId: "receipts",
+              logger,
+            }),
+          ).rejects.toThrow(heldMessage("Receipts"));
+          expect(deleteFolder).not.toHaveBeenCalled();
+
+          await deleteFolderForMcp({
+            userId: "user_1",
+            folderId: "receipts",
+            userConfirmed: true,
+            logger,
+          });
+          expect(deleteFolder).toHaveBeenCalledWith("receipts");
+        });
+
+        it("records a folder when delete_folder refuses because it still holds mail", async () => {
+          mockOutlook();
+
+          await expect(
+            deleteFolderForMcp({
+              userId: "user_1",
+              folderId: "receipts",
+              logger,
+            }),
+          ).rejects.toThrow("still holds 3 emails");
+          expect(recordedKeys()).toEqual([heldKey("receipts")]);
+
+          const { deleteFolder } = mockOutlook([
+            folder({ id: "receipts", displayName: "Receipts" }),
+          ]);
+          await expect(
+            deleteFolderForMcp({
+              userId: "user_1",
+              folderId: "receipts",
+              logger,
+            }),
+          ).rejects.toThrow(heldMessage("Receipts"));
+          expect(deleteFolder).not.toHaveBeenCalled();
+        });
+
+        it("does not record a system folder when delete_folder refuses it", async () => {
+          mockOutlook();
+
+          await expect(
+            deleteFolderForMcp({ userId: "user_1", folderId: "inbox", logger }),
+          ).rejects.toThrow("system folder");
+
+          expect(redis.set).not.toHaveBeenCalled();
+        });
+
+        it("still lists folders, searches and refuses when Redis cannot record", async () => {
+          mockOutlook();
+          vi.mocked(redis.set).mockRejectedValue(new Error("redis down"));
+
+          const listed = await listFoldersForMcp({ userId: "user_1", logger });
+          expect(listed.folders).toHaveLength(4);
+
+          const searched = await searchInboxForMcp({
+            userId: "user_1",
+            folderId: "Receipts",
+            logger,
+          });
+          expect(searched.messages).toHaveLength(2);
+
+          await expect(
+            deleteFolderForMcp({
+              userId: "user_1",
+              folderId: "receipts",
+              logger,
+            }),
+          ).rejects.toThrow("still holds 3 emails");
+        });
+      });
+
       async function archiveFolder() {
         mockOutlook();
         await archiveFolderForMcp({

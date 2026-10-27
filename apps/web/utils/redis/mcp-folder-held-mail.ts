@@ -28,6 +28,32 @@ export async function markFolderHeldMail({
   }
 }
 
+// For folders the server only saw holding mail. The delete-time read fails
+// closed, so a lost record here must not fail the read that triggered it.
+// Upstash batches calls made in the same tick into one HTTP request.
+export async function markFoldersSeenHoldingMail({
+  emailAccountId,
+  folderIds,
+  logger,
+}: {
+  emailAccountId: string;
+  folderIds: string[];
+  logger: Logger;
+}) {
+  if (folderIds.length === 0) return;
+  try {
+    await Promise.all(
+      folderIds.map((folderId) =>
+        redis.set(getKey({ emailAccountId, folderId }), "1", {
+          ex: HELD_MAIL_TTL_SECONDS,
+        }),
+      ),
+    );
+  } catch (error) {
+    logger.warn("Could not record folders that held mail", { error });
+  }
+}
+
 export async function wasFolderRecentlyHeldMail({
   emailAccountId,
   folderId,
