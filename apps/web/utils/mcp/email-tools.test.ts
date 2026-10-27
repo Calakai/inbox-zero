@@ -5,6 +5,7 @@ import { createTestLogger } from "@/__tests__/helpers";
 import type { OutlookFolder } from "@/utils/outlook/folders";
 import type { ParsedMessage } from "@/utils/types";
 import { runRulesOnMessage } from "@/utils/ai/choose-rule/run-rules-on-message";
+import { checkRateLimit } from "@/utils/rate-limit";
 import {
   archiveFolderForMcp,
   createDraftForMcp,
@@ -21,6 +22,10 @@ vi.mock("server-only", () => ({}));
 vi.mock("@/utils/email/provider");
 vi.mock("@/utils/ai/choose-rule/run-rules-on-message", () => ({
   runRulesOnMessage: vi.fn(),
+}));
+vi.mock("@/utils/rate-limit", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/utils/rate-limit")>()),
+  checkRateLimit: vi.fn(),
 }));
 vi.mock("@/utils/mcp/account-selection", () => ({
   resolveMcpEmailAccount: vi.fn(),
@@ -58,6 +63,11 @@ describe("MCP email tools", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(resolveMcpEmailAccount).mockResolvedValue(emailAccount);
+    vi.mocked(checkRateLimit).mockResolvedValue({
+      limited: false,
+      limit: 2,
+      remaining: 1,
+    });
   });
 
   it("returns search metadata without message bodies", async () => {
@@ -435,6 +445,21 @@ describe("MCP email tools", () => {
       await expect(
         deleteFolderForMcp({ userId: "user_1", folderId, logger }),
       ).rejects.toThrow(message);
+      expect(deleteFolder).not.toHaveBeenCalled();
+      expect(checkRateLimit).not.toHaveBeenCalled();
+    });
+
+    it("stops deleting folders once the limit is reached", async () => {
+      const { deleteFolder } = mockOutlook();
+      vi.mocked(checkRateLimit).mockResolvedValue({
+        limited: true,
+        limit: 2,
+        retryAfterSeconds: 600,
+      });
+
+      await expect(
+        deleteFolderForMcp({ userId: "user_1", folderId: "old", logger }),
+      ).rejects.toThrow("At most 2 folders");
       expect(deleteFolder).not.toHaveBeenCalled();
     });
 

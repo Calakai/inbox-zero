@@ -308,7 +308,7 @@ export async function handleMcpServerRequest(
     {
       title: "Delete folder",
       description:
-        "Delete one empty Outlook folder by folderId from list_folders. Refuses system folders (Inbox, Sent, Drafts, Archive, Deleted Items, Junk) and any folder that still holds email or subfolders; empty it first with archive_folder.",
+        "Delete one empty Outlook mail folder by folderId from list_folders. Refuses system folders (Inbox, Sent, Drafts, Archive, Deleted Items, Junk) and any folder that still holds email or subfolders; empty it first with archive_folder. At most 2 folders can be deleted every 10 minutes, so delete only the folders the user named.",
       inputSchema: deleteFolderInputShape,
       annotations: {
         ...mailboxWriteAnnotations,
