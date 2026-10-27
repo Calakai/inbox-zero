@@ -215,6 +215,7 @@ describe("MCP tool permissions and rule writes", () => {
     "update_thread",
     "label_thread",
     "archive_folder",
+    "move_folder_to_inbox",
     "delete_folder",
     "run_rules",
     "create_rule",

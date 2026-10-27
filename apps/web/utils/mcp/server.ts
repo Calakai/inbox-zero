@@ -33,6 +33,8 @@ import {
   labelThreadInputShape,
   listFoldersForMcp,
   listFoldersInputShape,
+  moveFolderToInboxForMcp,
+  moveFolderToInboxInputShape,
   mcpAccountSelectorShape,
   readThreadForMcp,
   readThreadInputShape,
@@ -94,7 +96,7 @@ export async function handleMcpServerRequest(
     { name: `${BRAND_NAME} MCP`, version: "1.0.0" },
     {
       instructions:
-        "Use list_email_accounts when targeting a specific inbox. Search and read tools return mail; create_draft saves a mailbox draft and never sends; update_thread archives or marks threads; label_thread adds or removes a label; list_folders, archive_folder and delete_folder manage Outlook folders; run_rules runs the user's rules on one email. Rule and stats tools accept emailAccountId or emailAddress and default to the first linked account.",
+        "Use list_email_accounts when targeting a specific inbox. Search and read tools return mail; create_draft saves a mailbox draft and never sends; update_thread archives or marks threads; label_thread adds or removes a label; list_folders, archive_folder, move_folder_to_inbox and delete_folder manage Outlook folders; run_rules runs the user's rules on one email. Rule and stats tools accept emailAccountId or emailAddress and default to the first linked account.",
     },
   );
 
@@ -140,7 +142,7 @@ export async function handleMcpServerRequest(
     {
       title: "Search inbox",
       description:
-        "Search one inbox, or one Outlook folder by folderId, and return message metadata and snippets. Does not return full message bodies, send email, or change mail.",
+        "Search one inbox, or one Outlook folder by folder name or folderId, and return message metadata and snippets. Does not return full message bodies, send email, or change mail.",
       inputSchema: searchInboxInputShape,
       annotations: { ...mailboxReadAnnotations, title: "Search inbox" },
     },
@@ -271,7 +273,7 @@ export async function handleMcpServerRequest(
     {
       title: "List folders",
       description:
-        "List the Outlook account's mail folders with their path, email count, unread count and subfolder count. canDelete marks the folders delete_folder will accept; when false, deleteBlockedReason says why. Outlook only; Gmail has labels instead of folders.",
+        "List the Outlook account's mail folders with their path, email count, unread count and subfolder count. Other folder tools accept a folder's name or path from here as well as its folderId. canDelete marks the folders delete_folder will accept; when false, deleteBlockedReason says why. Outlook only; Gmail has labels instead of folders.",
       inputSchema: listFoldersInputShape,
       annotations: { ...mailboxReadAnnotations, title: "List folders" },
     },
@@ -289,7 +291,7 @@ export async function handleMcpServerRequest(
     {
       title: "Archive folder",
       description:
-        "Move every email in one Outlook folder to Archive in a single call, by folderId from list_folders. Nothing is deleted and the folder stays; use this to empty a folder before delete_folder. Refuses system folders. Returns how many emails moved and how many failed.",
+        "Move every email in one Outlook folder to Archive in a single call, by folder name or folderId from list_folders. Nothing is deleted and the folder stays; use this to empty a folder before delete_folder. Refuses system folders. Returns how many emails moved and how many failed.",
       inputSchema: archiveFolderInputShape,
       annotations: { ...mailboxWriteAnnotations, title: "Archive folder" },
     },
@@ -304,11 +306,33 @@ export async function handleMcpServerRequest(
   );
 
   server.registerTool(
+    "move_folder_to_inbox",
+    {
+      title: "Move folder to inbox",
+      description:
+        "Move every email in one Outlook folder back to the Inbox in a single call, by folder name or folderId from list_folders. Nothing is deleted and the folder stays; once it is empty, delete_folder can remove it. Refuses system folders. Returns how many emails moved and how many failed.",
+      inputSchema: moveFolderToInboxInputShape,
+      annotations: {
+        ...mailboxWriteAnnotations,
+        title: "Move folder to inbox",
+      },
+    },
+    runTool("move_folder_to_inbox", "mcp:write", async (args) =>
+      moveFolderToInboxForMcp({
+        userId,
+        folderId: String(args.folderId),
+        ...accountSelector(args),
+        logger: toolLogger,
+      }),
+    ),
+  );
+
+  server.registerTool(
     "delete_folder",
     {
       title: "Delete folder",
       description:
-        "Delete one empty Outlook mail folder by folderId from list_folders. Refuses system folders (Inbox, Sent, Drafts, Archive, Deleted Items, Junk) and any folder that still holds email or subfolders; empty it first with archive_folder. At most 2 folders can be deleted every 10 minutes, so delete only the folders the user named.",
+        "Delete one empty Outlook mail folder by folder name or folderId from list_folders. Refuses system folders (Inbox, Sent, Drafts, Archive, Deleted Items, Junk) and any folder that still holds email or subfolders; empty it first with archive_folder or move_folder_to_inbox. At most 2 folders can be deleted every 10 minutes, so delete only the folders the user named.",
       inputSchema: deleteFolderInputShape,
       annotations: {
         ...mailboxWriteAnnotations,

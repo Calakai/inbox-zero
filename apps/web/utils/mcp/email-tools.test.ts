@@ -12,6 +12,7 @@ import {
   deleteFolderForMcp,
   labelThreadForMcp,
   listFoldersForMcp,
+  moveFolderToInboxForMcp,
   readThreadForMcp,
   runRulesForMcp,
   searchInboxForMcp,
@@ -108,6 +109,11 @@ describe("MCP email tools", () => {
     });
     vi.mocked(createEmailProvider).mockResolvedValue({
       searchMessages,
+      getFolders: vi
+        .fn()
+        .mockResolvedValue([
+          folder({ id: "marketing", displayName: "Marketing" }),
+        ]),
     } as never);
 
     const result = await searchInboxForMcp({
@@ -123,6 +129,55 @@ describe("MCP email tools", () => {
       folderId: "marketing",
       messages: [{ messageId: "message-1" }],
     });
+  });
+
+  it("searches a folder given by name using the folder's real ID", async () => {
+    const searchMessages = vi.fn().mockResolvedValue({ messages: [message()] });
+    vi.mocked(resolveMcpEmailAccount).mockResolvedValue({
+      ...emailAccount,
+      provider: "microsoft",
+    });
+    vi.mocked(createEmailProvider).mockResolvedValue({
+      searchMessages,
+      getFolders: vi.fn().mockResolvedValue([
+        folder({
+          id: "AQMkADAwATMwMAItYzE4-long-real-id",
+          displayName: "Marketing",
+        }),
+      ]),
+    } as never);
+
+    const result = await searchInboxForMcp({
+      userId: "user_1",
+      query: "sale",
+      folderId: "marketing",
+      logger,
+    });
+
+    expect(searchMessages).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: "sale",
+        folderId: "AQMkADAwATMwMAItYzE4-long-real-id",
+      }),
+    );
+    expect(result.folderId).toBe("AQMkADAwATMwMAItYzE4-long-real-id");
+  });
+
+  it("does not search when the folder name matches nothing", async () => {
+    const searchMessages = vi.fn();
+    vi.mocked(resolveMcpEmailAccount).mockResolvedValue({
+      ...emailAccount,
+      provider: "microsoft",
+    });
+    vi.mocked(createEmailProvider).mockResolvedValue({
+      searchMessages,
+      getFolders: vi.fn().mockResolvedValue([folder({ id: "a" })]),
+    } as never);
+
+    await expect(
+      searchInboxForMcp({ userId: "user_1", folderId: "Nope", logger }),
+    ).rejects.toThrow("list_folders");
+    expect(searchMessages).not.toHaveBeenCalled();
   });
 
   it("refuses a search with neither a query nor a folderId", async () => {
@@ -373,7 +428,7 @@ describe("MCP email tools", () => {
       folder({ id: "receipts", displayName: "Receipts", totalItemCount: 3 }),
     ];
 
-    function mockOutlook() {
+    function mockOutlook(tree: OutlookFolder[] = folderTree) {
       const deleteFolder = vi.fn().mockResolvedValue(undefined);
       const searchMessages = vi
         .fn()
@@ -391,14 +446,21 @@ describe("MCP email tools", () => {
         succeededThreadIds: ["ta"],
         failedThreadIds: ["tb"],
       });
+      const unarchiveMessages = vi.fn().mockResolvedValue(undefined);
       vi.mocked(resolveMcpEmailAccount).mockResolvedValue(outlookAccount);
       vi.mocked(createEmailProvider).mockResolvedValue({
-        getFolders: vi.fn().mockResolvedValue(folderTree),
+        getFolders: vi.fn().mockResolvedValue(tree),
         deleteFolder,
         searchMessages,
         bulkArchiveThreads,
+        unarchiveMessages,
       } as never);
-      return { deleteFolder, searchMessages, bulkArchiveThreads };
+      return {
+        deleteFolder,
+        searchMessages,
+        bulkArchiveThreads,
+        unarchiveMessages,
+      };
     }
 
     it("lists nested folders and marks only empty custom folders deletable", async () => {
@@ -532,6 +594,175 @@ describe("MCP email tools", () => {
         archiveFolderForMcp({ userId: "user_1", folderId, logger }),
       ).rejects.toThrow(message);
       expect(bulkArchiveThreads).not.toHaveBeenCalled();
+    });
+
+    describe("folder by name", () => {
+      it("resolves a path case-insensitively", async () => {
+        const { deleteFolder } = mockOutlook();
+
+        const result = await deleteFolderForMcp({
+          userId: "user_1",
+          folderId: "projects ⦙ OLD",
+          logger,
+        });
+
+        expect(deleteFolder).toHaveBeenCalledWith("old");
+        expect(result.folderId).toBe("old");
+      });
+
+      it("resolves a display name case-insensitively", async () => {
+        const { searchMessages, bulkArchiveThreads } = mockOutlook();
+
+        const result = await archiveFolderForMcp({
+          userId: "user_1",
+          folderId: "RECEIPTS",
+          logger,
+        });
+
+        expect(searchMessages).toHaveBeenCalledWith(
+          expect.objectContaining({ folderId: "receipts" }),
+        );
+        expect(bulkArchiveThreads).toHaveBeenCalled();
+        expect(result.folderId).toBe("receipts");
+      });
+
+      it("prefers an exact ID over a folder that happens to have that name", async () => {
+        const { deleteFolder } = mockOutlook([
+          folder({ id: "old", displayName: "Old" }),
+          folder({ id: "other", displayName: "old" }),
+        ]);
+
+        await deleteFolderForMcp({ userId: "user_1", folderId: "old", logger });
+
+        expect(deleteFolder).toHaveBeenCalledWith("old");
+      });
+
+      it("prefers a path match over a display name shared with a subfolder", async () => {
+        const { deleteFolder } = mockOutlook([
+          folder({ id: "top-old", displayName: "Old" }),
+          folder({
+            id: "projects",
+            displayName: "Projects",
+            childFolderCount: 1,
+            childFolders: [folder({ id: "nested-old", displayName: "Old" })],
+          }),
+        ]);
+
+        await deleteFolderForMcp({ userId: "user_1", folderId: "Old", logger });
+
+        expect(deleteFolder).toHaveBeenCalledWith("top-old");
+      });
+
+      it("lists the matching paths when a name is ambiguous", async () => {
+        const { deleteFolder } = mockOutlook([
+          folder({
+            id: "projects",
+            displayName: "Projects",
+            childFolderCount: 1,
+            childFolders: [folder({ id: "p-old", displayName: "Old" })],
+          }),
+          folder({
+            id: "clients",
+            displayName: "Clients",
+            childFolderCount: 1,
+            childFolders: [folder({ id: "c-old", displayName: "Old" })],
+          }),
+        ]);
+
+        const attempt = deleteFolderForMcp({
+          userId: "user_1",
+          folderId: "old",
+          logger,
+        });
+
+        await expect(attempt).rejects.toThrow("Projects ⦙ Old");
+        await expect(attempt).rejects.toThrow("Clients ⦙ Old");
+        expect(deleteFolder).not.toHaveBeenCalled();
+      });
+
+      it("says a name was not found and points to list_folders", async () => {
+        mockOutlook();
+
+        await expect(
+          archiveFolderForMcp({
+            userId: "user_1",
+            folderId: "Recipts",
+            logger,
+          }),
+        ).rejects.toThrow(/"Recipts" not found.*list_folders/);
+      });
+    });
+
+    describe("move_folder_to_inbox", () => {
+      it("moves every email in a folder back to the inbox and reports failures", async () => {
+        const { searchMessages, unarchiveMessages, bulkArchiveThreads } =
+          mockOutlook();
+        unarchiveMessages
+          .mockRejectedValueOnce(new Error("batch failed"))
+          .mockResolvedValueOnce(undefined)
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(new Error("gone"));
+
+        const result = await moveFolderToInboxForMcp({
+          userId: "user_1",
+          folderId: "Receipts",
+          logger,
+        });
+
+        expect(searchMessages).toHaveBeenCalledTimes(2);
+        expect(searchMessages).toHaveBeenCalledWith(
+          expect.objectContaining({ folderId: "receipts" }),
+        );
+        expect(unarchiveMessages).toHaveBeenNthCalledWith(1, [
+          "r1",
+          "r2",
+          "r3",
+        ]);
+        expect(unarchiveMessages).toHaveBeenCalledWith(["r1"]);
+        expect(bulkArchiveThreads).not.toHaveBeenCalled();
+        expect(result).toMatchObject({
+          folderId: "receipts",
+          path: "Receipts",
+          moved: 2,
+          failed: 1,
+        });
+      });
+
+      it("moves everything in one call when nothing fails", async () => {
+        const { unarchiveMessages } = mockOutlook();
+
+        const result = await moveFolderToInboxForMcp({
+          userId: "user_1",
+          folderId: "receipts",
+          logger,
+        });
+
+        expect(unarchiveMessages).toHaveBeenCalledTimes(1);
+        expect(result).toMatchObject({ moved: 3, failed: 0 });
+      });
+
+      it.each([
+        ["a system folder", "inbox", "system folder"],
+        ["an unknown folder", "missing", "list_folders"],
+      ])("refuses to move %s", async (_case, folderId, message) => {
+        const { unarchiveMessages } = mockOutlook();
+
+        await expect(
+          moveFolderToInboxForMcp({ userId: "user_1", folderId, logger }),
+        ).rejects.toThrow(message);
+        expect(unarchiveMessages).not.toHaveBeenCalled();
+      });
+
+      it("refuses Gmail accounts before touching the mailbox", async () => {
+        await expect(
+          moveFolderToInboxForMcp({
+            userId: "user_1",
+            folderId: "old",
+            logger,
+          }),
+        ).rejects.toThrow("Outlook");
+        expect(createEmailProvider).not.toHaveBeenCalled();
+      });
     });
   });
 });
