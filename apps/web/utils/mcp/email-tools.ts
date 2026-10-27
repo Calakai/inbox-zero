@@ -213,13 +213,25 @@ export async function searchInboxForMcp({
     pageToken,
   });
 
-  // Seeing mail in a folder is how a model finds what to remove one by one.
-  if (folder && !folder.systemType && searchResult.messages.length > 0)
-    await markFoldersSeenHoldingMail({
-      emailAccountId: emailAccount.id,
-      folderIds: [folder.id],
-      logger,
-    });
+  // Seeing mail in a folder is how a model finds what to remove one by one,
+  // whether it searched that folder or the whole mailbox. A whole-mailbox hit
+  // may sit in a system folder; delete_folder refuses those anyway.
+  const seenFolderIds = folder
+    ? folder.systemType || searchResult.messages.length === 0
+      ? []
+      : [folder.id]
+    : [
+        ...new Set(
+          searchResult.messages.flatMap(({ parentFolderId }) =>
+            parentFolderId ? [parentFolderId] : [],
+          ),
+        ),
+      ];
+  await markFoldersSeenHoldingMail({
+    emailAccountId: emailAccount.id,
+    folderIds: seenFolderIds,
+    logger,
+  });
 
   return {
     emailAccount,

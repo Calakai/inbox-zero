@@ -867,17 +867,67 @@ describe("MCP email tools", () => {
           expect(redis.set).not.toHaveBeenCalled();
         });
 
-        it("does not record anything for a search without a folder", async () => {
-          mockOutlook();
+        it("records the folders a whole-mailbox search finds mail in", async () => {
+          const { searchMessages } = mockOutlook();
+          searchMessages.mockReset().mockResolvedValue({
+            messages: [
+              message({ id: "r1", parentFolderId: "receipts" }),
+              message({ id: "r2", parentFolderId: "receipts" }),
+              message({ id: "r3" }),
+            ],
+          });
 
           await searchInboxForMcp({ userId: "user_1", query: "sale", logger });
 
-          expect(redis.set).not.toHaveBeenCalled();
+          expect(recordedKeys()).toEqual([heldKey("receipts")]);
         });
 
         it("refuses to delete a folder emptied one email at a time with update_thread", async () => {
           mockOutlook();
           await listFoldersForMcp({ userId: "user_1", logger });
+          vi.mocked(createEmailProvider).mockResolvedValue({
+            trashThread: vi.fn().mockResolvedValue(undefined),
+          } as never);
+          await updateThreadForMcp({
+            userId: "user_1",
+            threadId: "ta",
+            action: "trash",
+            logger,
+          });
+          const { deleteFolder } = mockOutlook([
+            folder({ id: "receipts", displayName: "Receipts" }),
+          ]);
+
+          await expect(
+            deleteFolderForMcp({
+              userId: "user_1",
+              folderId: "receipts",
+              logger,
+            }),
+          ).rejects.toThrow(heldMessage("Receipts"));
+          expect(deleteFolder).not.toHaveBeenCalled();
+
+          await deleteFolderForMcp({
+            userId: "user_1",
+            folderId: "receipts",
+            userConfirmed: true,
+            logger,
+          });
+          expect(deleteFolder).toHaveBeenCalledWith("receipts");
+        });
+
+        it("refuses to delete a folder emptied after a whole-mailbox search", async () => {
+          const { searchMessages } = mockOutlook();
+          searchMessages.mockReset().mockResolvedValue({
+            messages: [
+              message({ id: "r1", threadId: "ta", parentFolderId: "receipts" }),
+            ],
+          });
+          await searchInboxForMcp({
+            userId: "user_1",
+            query: "receipt",
+            logger,
+          });
           vi.mocked(createEmailProvider).mockResolvedValue({
             trashThread: vi.fn().mockResolvedValue(undefined),
           } as never);
