@@ -10,6 +10,10 @@ import {
   type OutlookFolder,
 } from "@/utils/outlook/folders";
 import { checkRateLimit, createRateLimitKey } from "@/utils/rate-limit";
+import {
+  markFolderHeldMail,
+  wasFolderRecentlyHeldMail,
+} from "@/utils/redis/mcp-folder-held-mail";
 import { textToHtmlParagraphs } from "@/utils/string";
 import type { EmailProvider } from "@/utils/email/types";
 import type { Logger } from "@/utils/logger";
@@ -133,7 +137,7 @@ export const runRulesInputShape = {
 
 export const listFoldersInputShape = mcpAccountSelectorShape;
 
-export const deleteFolderInputShape = {
+const folderInputShape = {
   ...mcpAccountSelectorShape,
   folderId: z
     .string()
@@ -144,9 +148,19 @@ export const deleteFolderInputShape = {
     ),
 };
 
-export const archiveFolderInputShape = deleteFolderInputShape;
+export const archiveFolderInputShape = folderInputShape;
 
-export const moveFolderToInboxInputShape = deleteFolderInputShape;
+export const moveFolderToInboxInputShape = folderInputShape;
+
+export const deleteFolderInputShape = {
+  ...folderInputShape,
+  userConfirmed: z
+    .boolean()
+    .optional()
+    .describe(
+      "Set true only after the user has said yes to deleting this folder; the client may ask the user to approve the call. Required when the folder held email or subfolders until recently.",
+    ),
+};
 
 export async function searchInboxForMcp({
   userId,
@@ -429,12 +443,14 @@ export async function listFoldersForMcp({
 export async function deleteFolderForMcp({
   userId,
   folderId,
+  userConfirmed,
   emailAccountId,
   emailAddress,
   logger,
 }: {
   userId: string;
   folderId: string;
+  userConfirmed?: boolean;
   emailAccountId?: string;
   emailAddress?: string;
   logger: Logger;
@@ -454,6 +470,20 @@ export async function deleteFolderForMcp({
   const blocker = getFolderDeleteBlocker(folder);
   if (blocker) throw new Error(`Not deleted: "${folder.path}" ${blocker}.`);
 
+  // A model can empty a folder and delete it in one go, so a folder that held
+  // mail until recently needs the user's yes, which the client collects.
+  if (
+    userConfirmed !== true &&
+    (await wasFolderRecentlyHeldMail({
+      emailAccountId: emailAccount.id,
+      folderId: folder.id,
+      logger,
+    }))
+  )
+    throw new Error(
+      `Not deleted: "${folder.path}" held email or subfolders until recently (now moved). Ask the user first; delete it only after they say yes, by calling delete_folder again with userConfirmed: true.`,
+    );
+
   const budget = await checkRateLimit({
     rule: {
       key: createRateLimitKey([
@@ -469,6 +499,23 @@ export async function deleteFolderForMcp({
   if (budget.limited)
     throw new Error(
       `Not deleted: "${folder.path}". At most ${FOLDER_DELETE_LIMIT.limit} folders can be deleted every ${FOLDER_DELETE_LIMIT.windowSeconds / 60} minutes. Tell the user which folders are left; they can delete them in Outlook or ask again later.`,
+    );
+
+  // Recorded before deleting: a failed record must not leave the parent
+  // deletable without the user's yes.
+  const parent = folders.find((candidate) =>
+    candidate.childFolders.some((child) => child.id === folder.id),
+  );
+  if (
+    parent &&
+    !(await markFolderHeldMail({
+      emailAccountId: emailAccount.id,
+      folderId: parent.id,
+      logger,
+    }))
+  )
+    throw new Error(
+      `Not deleted: could not record "${parent.path}" for the delete check; nothing was deleted.`,
     );
 
   await emailProvider.deleteFolder(folder.id);
@@ -520,6 +567,20 @@ export async function archiveFolderForMcp({
     ]);
   }
   const collected = messages.length;
+
+  // Recorded before anything moves: if the record fails, the folder could
+  // later be deleted without the user's yes.
+  if (
+    messages.length > 0 &&
+    !(await markFolderHeldMail({
+      emailAccountId: emailAccount.id,
+      folderId: folder.id,
+      logger,
+    }))
+  )
+    throw new Error(
+      `Not archived: could not record "${folder.path}" for the delete check; nothing was moved.`,
+    );
 
   const result = await emailProvider.bulkArchiveThreads(
     [...threads].map(([threadId, messageIds]) => ({ threadId, messageIds })),
@@ -574,6 +635,20 @@ export async function moveFolderToInboxForMcp({
     emailProvider,
     folder.id,
   );
+
+  // Recorded before anything moves: if the record fails, the folder could
+  // later be deleted without the user's yes.
+  if (
+    messages.length > 0 &&
+    !(await markFolderHeldMail({
+      emailAccountId: emailAccount.id,
+      folderId: folder.id,
+      logger,
+    }))
+  )
+    throw new Error(
+      `Not moved: could not record "${folder.path}" for the delete check; nothing was moved.`,
+    );
 
   // unarchiveMessages moves each message to the inbox from any folder and
   // throws on the first failure, so a failed chunk is retried one by one to

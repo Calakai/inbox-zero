@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmailProvider } from "@/utils/email/provider";
 import { resolveMcpEmailAccount } from "@/utils/mcp/account-selection";
@@ -6,6 +7,7 @@ import type { OutlookFolder } from "@/utils/outlook/folders";
 import type { ParsedMessage } from "@/utils/types";
 import { runRulesOnMessage } from "@/utils/ai/choose-rule/run-rules-on-message";
 import { checkRateLimit, createRateLimitKey } from "@/utils/rate-limit";
+import { redis } from "@/utils/redis";
 import {
   archiveFolderForMcp,
   createDraftForMcp,
@@ -27,6 +29,9 @@ vi.mock("@/utils/ai/choose-rule/run-rules-on-message", () => ({
 vi.mock("@/utils/rate-limit", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/utils/rate-limit")>()),
   checkRateLimit: vi.fn(),
+}));
+vi.mock("@/utils/redis", () => ({
+  redis: { get: vi.fn(), set: vi.fn() },
 }));
 vi.mock("@/utils/mcp/account-selection", () => ({
   resolveMcpEmailAccount: vi.fn(),
@@ -417,6 +422,17 @@ describe("MCP email tools", () => {
 
   describe("folders", () => {
     const outlookAccount = { ...emailAccount, provider: "microsoft" };
+
+    beforeEach(() => {
+      const store = new Map<string, unknown>();
+      vi.mocked(redis.get).mockImplementation(
+        async (key: string) => store.get(key) ?? null,
+      );
+      vi.mocked(redis.set).mockImplementation(async (key: string, value) => {
+        store.set(key, value);
+        return "OK";
+      });
+    });
     const folderTree = [
       folder({ id: "inbox", displayName: "Inbox", systemType: "INBOX" }),
       folder({
@@ -548,6 +564,246 @@ describe("MCP email tools", () => {
           outlookAccount.id,
         ]),
       );
+    });
+
+    describe("deleting a folder that recently held mail", () => {
+      const receiptsEmptied = [
+        folder({ id: "receipts", displayName: "Receipts" }),
+      ];
+      const heldMessage = (path: string) =>
+        `Not deleted: "${path}" held email or subfolders until recently (now moved). Ask the user first; delete it only after they say yes, by calling delete_folder again with userConfirmed: true.`;
+
+      it("refuses to delete a folder after archive_folder emptied it", async () => {
+        await archiveFolder();
+        const { deleteFolder } = mockOutlook(receiptsEmptied);
+
+        await expect(
+          deleteFolderForMcp({
+            userId: "user_1",
+            folderId: "receipts",
+            logger,
+          }),
+        ).rejects.toThrow(heldMessage("Receipts"));
+        expect(deleteFolder).not.toHaveBeenCalled();
+        expect(checkRateLimit).not.toHaveBeenCalled();
+      });
+
+      it("deletes it once the user has confirmed", async () => {
+        await archiveFolder();
+        const { deleteFolder } = mockOutlook(receiptsEmptied);
+
+        const result = await deleteFolderForMcp({
+          userId: "user_1",
+          folderId: "receipts",
+          userConfirmed: true,
+          logger,
+        });
+
+        expect(deleteFolder).toHaveBeenCalledWith("receipts");
+        expect(result).toMatchObject({ path: "Receipts", deleted: true });
+        expect(checkRateLimit).toHaveBeenCalledTimes(1);
+      });
+
+      it("treats userConfirmed false like a missing flag", async () => {
+        await archiveFolder();
+        const { deleteFolder } = mockOutlook(receiptsEmptied);
+
+        await expect(
+          deleteFolderForMcp({
+            userId: "user_1",
+            folderId: "receipts",
+            userConfirmed: false,
+            logger,
+          }),
+        ).rejects.toThrow("Ask the user first");
+        expect(deleteFolder).not.toHaveBeenCalled();
+      });
+
+      it("refuses to delete a folder after move_folder_to_inbox emptied it", async () => {
+        const { unarchiveMessages } = mockOutlook();
+        await moveFolderToInboxForMcp({
+          userId: "user_1",
+          folderId: "receipts",
+          logger,
+        });
+        expect(unarchiveMessages).toHaveBeenCalled();
+        const { deleteFolder } = mockOutlook(receiptsEmptied);
+
+        await expect(
+          deleteFolderForMcp({
+            userId: "user_1",
+            folderId: "receipts",
+            logger,
+          }),
+        ).rejects.toThrow(heldMessage("Receipts"));
+        expect(deleteFolder).not.toHaveBeenCalled();
+      });
+
+      it("remembers a folder for a day, per email account", async () => {
+        await archiveFolder();
+
+        expect(redis.set).toHaveBeenCalledTimes(1);
+        const [key, , options] = vi.mocked(redis.set).mock.calls[0];
+        expect(key).toBe(
+          createRateLimitKey([
+            "mcp",
+            "folder-held-mail",
+            outlookAccount.id,
+            createHash("sha256").update("receipts").digest("hex"),
+          ]),
+        );
+        expect(options).toEqual({ ex: 24 * 60 * 60 });
+
+        const { deleteFolder } = mockOutlook(receiptsEmptied);
+        vi.mocked(resolveMcpEmailAccount).mockResolvedValue({
+          ...outlookAccount,
+          id: "account_2",
+        });
+        await deleteFolderForMcp({
+          userId: "user_1",
+          folderId: "receipts",
+          logger,
+        });
+        expect(deleteFolder).toHaveBeenCalledWith("receipts");
+      });
+
+      it("does not remember a folder when no email moved out of it", async () => {
+        const { searchMessages } = mockOutlook();
+        searchMessages.mockReset().mockResolvedValue({ messages: [] });
+        await archiveFolderForMcp({
+          userId: "user_1",
+          folderId: "receipts",
+          logger,
+        });
+        expect(redis.set).not.toHaveBeenCalled();
+      });
+
+      it("marks the parent when a subfolder is deleted", async () => {
+        const { deleteFolder } = mockOutlook();
+        await deleteFolderForMcp({ userId: "user_1", folderId: "old", logger });
+        expect(deleteFolder).toHaveBeenCalledWith("old");
+
+        const projectsNowEmpty = mockOutlook([
+          folder({ id: "projects", displayName: "Projects" }),
+        ]);
+        await expect(
+          deleteFolderForMcp({
+            userId: "user_1",
+            folderId: "projects",
+            logger,
+          }),
+        ).rejects.toThrow(heldMessage("Projects"));
+        expect(projectsNowEmpty.deleteFolder).not.toHaveBeenCalled();
+      });
+
+      it("does not mark anything when a top-level folder is deleted", async () => {
+        mockOutlook([folder({ id: "empty", displayName: "Empty" })]);
+        await deleteFolderForMcp({
+          userId: "user_1",
+          folderId: "empty",
+          logger,
+        });
+        expect(redis.set).not.toHaveBeenCalled();
+      });
+
+      it("deletes a folder that was never emptied without confirmation", async () => {
+        const { deleteFolder } = mockOutlook([
+          folder({ id: "empty", displayName: "Empty" }),
+        ]);
+
+        const result = await deleteFolderForMcp({
+          userId: "user_1",
+          folderId: "empty",
+          logger,
+        });
+
+        expect(deleteFolder).toHaveBeenCalledWith("empty");
+        expect(result.deleted).toBe(true);
+      });
+
+      it("requires confirmation when Redis cannot be read", async () => {
+        const { deleteFolder } = mockOutlook([
+          folder({ id: "empty", displayName: "Empty" }),
+        ]);
+        vi.mocked(redis.get).mockRejectedValue(new Error("redis down"));
+
+        await expect(
+          deleteFolderForMcp({ userId: "user_1", folderId: "empty", logger }),
+        ).rejects.toThrow(heldMessage("Empty"));
+        expect(deleteFolder).not.toHaveBeenCalled();
+
+        await deleteFolderForMcp({
+          userId: "user_1",
+          folderId: "empty",
+          userConfirmed: true,
+          logger,
+        });
+        expect(deleteFolder).toHaveBeenCalledWith("empty");
+      });
+
+      it("moves nothing when Redis cannot record the folder", async () => {
+        const archiving = mockOutlook();
+        vi.mocked(redis.set).mockRejectedValue(new Error("redis down"));
+
+        await expect(
+          archiveFolderForMcp({
+            userId: "user_1",
+            folderId: "receipts",
+            logger,
+          }),
+        ).rejects.toThrow(
+          'Not archived: could not record "Receipts" for the delete check; nothing was moved.',
+        );
+        const moving = mockOutlook();
+        await expect(
+          moveFolderToInboxForMcp({
+            userId: "user_1",
+            folderId: "receipts",
+            logger,
+          }),
+        ).rejects.toThrow(
+          'Not moved: could not record "Receipts" for the delete check; nothing was moved.',
+        );
+        expect(archiving.bulkArchiveThreads).not.toHaveBeenCalled();
+        expect(moving.unarchiveMessages).not.toHaveBeenCalled();
+      });
+
+      it("deletes nothing when Redis cannot record the parent", async () => {
+        const { deleteFolder } = mockOutlook();
+        vi.mocked(redis.set).mockRejectedValue(new Error("redis down"));
+
+        await expect(
+          deleteFolderForMcp({ userId: "user_1", folderId: "old", logger }),
+        ).rejects.toThrow(
+          'Not deleted: could not record "Projects" for the delete check; nothing was deleted.',
+        );
+        expect(deleteFolder).not.toHaveBeenCalled();
+      });
+
+      it("reports the system and not-empty blockers before asking for confirmation", async () => {
+        await archiveFolder();
+        mockOutlook();
+
+        await expect(
+          deleteFolderForMcp({
+            userId: "user_1",
+            folderId: "receipts",
+            logger,
+          }),
+        ).rejects.toThrow("still holds 3 emails");
+        await expect(
+          deleteFolderForMcp({ userId: "user_1", folderId: "inbox", logger }),
+        ).rejects.toThrow("system folder");
+      });
+
+      async function archiveFolder() {
+        mockOutlook();
+        await archiveFolderForMcp({
+          userId: "user_1",
+          folderId: "receipts",
+          logger,
+        });
+      }
     });
 
     it("refuses Gmail accounts before touching the mailbox", async () => {
