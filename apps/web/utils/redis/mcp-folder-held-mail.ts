@@ -19,9 +19,12 @@ export async function markFolderHeldMail({
     await redis.set(getKey({ emailAccountId, folderId }), "1", {
       ex: HELD_MAIL_TTL_SECONDS,
     });
+    return true;
   } catch (error) {
-    // The move or delete already happened, so there is nothing to undo.
+    // Callers record before moving or deleting and stop on false, so a lost
+    // record can never leave an emptied folder deletable without asking.
     logger.warn("Could not record that a folder held mail", { error });
+    return false;
   }
 }
 

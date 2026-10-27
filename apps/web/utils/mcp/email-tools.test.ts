@@ -741,17 +741,43 @@ describe("MCP email tools", () => {
         expect(deleteFolder).toHaveBeenCalledWith("empty");
       });
 
-      it("still reports an archive when Redis cannot record the folder", async () => {
-        mockOutlook();
+      it("moves nothing when Redis cannot record the folder", async () => {
+        const archiving = mockOutlook();
         vi.mocked(redis.set).mockRejectedValue(new Error("redis down"));
 
-        const result = await archiveFolderForMcp({
-          userId: "user_1",
-          folderId: "receipts",
-          logger,
-        });
+        await expect(
+          archiveFolderForMcp({
+            userId: "user_1",
+            folderId: "receipts",
+            logger,
+          }),
+        ).rejects.toThrow(
+          'Not archived: could not record "Receipts" for the delete check; nothing was moved.',
+        );
+        const moving = mockOutlook();
+        await expect(
+          moveFolderToInboxForMcp({
+            userId: "user_1",
+            folderId: "receipts",
+            logger,
+          }),
+        ).rejects.toThrow(
+          'Not moved: could not record "Receipts" for the delete check; nothing was moved.',
+        );
+        expect(archiving.bulkArchiveThreads).not.toHaveBeenCalled();
+        expect(moving.unarchiveMessages).not.toHaveBeenCalled();
+      });
 
-        expect(result.archived).toBe(2);
+      it("deletes nothing when Redis cannot record the parent", async () => {
+        const { deleteFolder } = mockOutlook();
+        vi.mocked(redis.set).mockRejectedValue(new Error("redis down"));
+
+        await expect(
+          deleteFolderForMcp({ userId: "user_1", folderId: "old", logger }),
+        ).rejects.toThrow(
+          'Not deleted: could not record "Projects" for the delete check; nothing was deleted.',
+        );
+        expect(deleteFolder).not.toHaveBeenCalled();
       });
 
       it("reports the system and not-empty blockers before asking for confirmation", async () => {

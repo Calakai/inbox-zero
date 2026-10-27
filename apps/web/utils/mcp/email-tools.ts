@@ -501,18 +501,25 @@ export async function deleteFolderForMcp({
       `Not deleted: "${folder.path}". At most ${FOLDER_DELETE_LIMIT.limit} folders can be deleted every ${FOLDER_DELETE_LIMIT.windowSeconds / 60} minutes. Tell the user which folders are left; they can delete them in Outlook or ask again later.`,
     );
 
-  await emailProvider.deleteFolder(folder.id);
-  logger.info("Deleted empty folder via MCP", { folderId: folder.id });
-
+  // Recorded before deleting: a failed record must not leave the parent
+  // deletable without the user's yes.
   const parent = folders.find((candidate) =>
     candidate.childFolders.some((child) => child.id === folder.id),
   );
-  if (parent)
-    await markFolderHeldMail({
+  if (
+    parent &&
+    !(await markFolderHeldMail({
       emailAccountId: emailAccount.id,
       folderId: parent.id,
       logger,
-    });
+    }))
+  )
+    throw new Error(
+      `Not deleted: could not record "${parent.path}" for the delete check; nothing was deleted.`,
+    );
+
+  await emailProvider.deleteFolder(folder.id);
+  logger.info("Deleted empty folder via MCP", { folderId: folder.id });
 
   return {
     emailAccount,
@@ -561,6 +568,20 @@ export async function archiveFolderForMcp({
   }
   const collected = messages.length;
 
+  // Recorded before anything moves: if the record fails, the folder could
+  // later be deleted without the user's yes.
+  if (
+    messages.length > 0 &&
+    !(await markFolderHeldMail({
+      emailAccountId: emailAccount.id,
+      folderId: folder.id,
+      logger,
+    }))
+  )
+    throw new Error(
+      `Not archived: could not record "${folder.path}" for the delete check; nothing was moved.`,
+    );
+
   const result = await emailProvider.bulkArchiveThreads(
     [...threads].map(([threadId, messageIds]) => ({ threadId, messageIds })),
     emailAccount.email,
@@ -574,12 +595,6 @@ export async function archiveFolderForMcp({
     archived,
     failedThreads: failed.size,
   });
-  if (archived > 0)
-    await markFolderHeldMail({
-      emailAccountId: emailAccount.id,
-      folderId: folder.id,
-      logger,
-    });
 
   return {
     emailAccount,
@@ -621,6 +636,20 @@ export async function moveFolderToInboxForMcp({
     folder.id,
   );
 
+  // Recorded before anything moves: if the record fails, the folder could
+  // later be deleted without the user's yes.
+  if (
+    messages.length > 0 &&
+    !(await markFolderHeldMail({
+      emailAccountId: emailAccount.id,
+      folderId: folder.id,
+      logger,
+    }))
+  )
+    throw new Error(
+      `Not moved: could not record "${folder.path}" for the delete check; nothing was moved.`,
+    );
+
   // unarchiveMessages moves each message to the inbox from any folder and
   // throws on the first failure, so a failed chunk is retried one by one to
   // count exactly what stayed behind.
@@ -651,12 +680,6 @@ export async function moveFolderToInboxForMcp({
     moved,
     failed: messages.length - moved,
   });
-  if (moved > 0)
-    await markFolderHeldMail({
-      emailAccountId: emailAccount.id,
-      folderId: folder.id,
-      logger,
-    });
 
   return {
     emailAccount,
