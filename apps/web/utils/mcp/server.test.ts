@@ -398,6 +398,29 @@ describe("MCP write tool summaries", () => {
     );
   });
 
+  it("a thread that was not found gets no success sentence", async () => {
+    vi.mocked(resolveMcpEmailAccount).mockResolvedValueOnce({
+      id: "account_1",
+      email: "owner@example.com",
+      name: null,
+      provider: "microsoft",
+    });
+    const archiveThread = vi.fn();
+    vi.mocked(createEmailProvider).mockResolvedValueOnce({
+      getThreadFolderIds: vi.fn().mockResolvedValue([]),
+      archiveThread,
+    } as never);
+    const tool = await getTool("update_thread", ["mcp:write"]);
+
+    await expect(
+      tool({ threadId: "gone", action: "archive" }),
+    ).rejects.toHaveProperty(
+      "message",
+      "Not moved: the conversation was not found or has no messages; nothing was moved.",
+    );
+    expect(archiveThread).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       name: "a missing permission",

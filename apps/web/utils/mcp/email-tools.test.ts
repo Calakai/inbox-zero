@@ -8,6 +8,8 @@ import type { ParsedMessage } from "@/utils/types";
 import { runRulesOnMessage } from "@/utils/ai/choose-rule/run-rules-on-message";
 import { checkRateLimit, createRateLimitKey } from "@/utils/rate-limit";
 import { redis } from "@/utils/redis";
+import { SafeError } from "@/utils/error";
+import { OutlookThreadNotFoundError } from "@/utils/outlook/thread-helpers";
 import {
   archiveFolderForMcp,
   createDraftForMcp,
@@ -426,7 +428,7 @@ describe("MCP email tools", () => {
       provider: "microsoft",
     });
     vi.mocked(createEmailProvider).mockResolvedValue({
-      getThreadFolderIds: vi.fn().mockResolvedValue([]),
+      getThreadFolderIds: vi.fn().mockResolvedValue(["inbox"]),
       trashThread: vi.fn(),
     } as never);
 
@@ -439,6 +441,104 @@ describe("MCP email tools", () => {
 
     expect(result.summary).toBe(
       "Moved 1 conversation to Deleted Items; it can be restored.",
+    );
+  });
+
+  it.each([
+    ["archive", "archiveThread"],
+    ["unarchive", "unarchiveThread"],
+    ["trash", "trashThread"],
+  ] as const)("does not claim to %s an Outlook thread that was not found", async (action, method) => {
+    vi.mocked(resolveMcpEmailAccount).mockResolvedValue({
+      ...emailAccount,
+      provider: "microsoft",
+    });
+    const move = vi.fn();
+    vi.mocked(createEmailProvider).mockResolvedValue({
+      getThreadFolderIds: vi.fn().mockResolvedValue([]),
+      [method]: move,
+    } as never);
+
+    await expect(
+      updateThreadForMcp({
+        userId: "user_1",
+        threadId: "gone",
+        action,
+        logger,
+      }),
+    ).rejects.toThrow(
+      new SafeError(
+        "Not moved: the conversation was not found or has no messages; nothing was moved.",
+      ),
+    );
+    expect(move).not.toHaveBeenCalled();
+  });
+
+  it("passes a provider's thread-not-found on as a refusal when marking read", async () => {
+    vi.mocked(resolveMcpEmailAccount).mockResolvedValue({
+      ...emailAccount,
+      provider: "microsoft",
+    });
+    vi.mocked(createEmailProvider).mockResolvedValue({
+      markReadThread: vi
+        .fn()
+        .mockRejectedValue(new OutlookThreadNotFoundError()),
+    } as never);
+
+    const error = await updateThreadForMcp({
+      userId: "user_1",
+      threadId: "gone",
+      action: "mark_read",
+      logger,
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(SafeError);
+    expect(error).toHaveProperty(
+      "message",
+      "Conversation not found or it has no messages; nothing was changed.",
+    );
+  });
+
+  it("says a removed label is no longer on the conversation", async () => {
+    vi.mocked(createEmailProvider).mockResolvedValue({
+      getLabelByName: vi.fn().mockResolvedValue({ id: "label-1", name: "FYI" }),
+      removeThreadLabel: vi.fn(),
+    } as never);
+
+    const result = await labelThreadForMcp({
+      userId: "user_1",
+      threadId: "thread-1",
+      labelName: "FYI",
+      remove: true,
+      logger,
+    });
+
+    expect(result.summary).toBe(
+      'The conversation no longer has the label "FYI".',
+    );
+  });
+
+  it("says which rule actions ran and which are scheduled for later", async () => {
+    vi.mocked(runRulesOnMessage).mockResolvedValue([
+      {
+        rule: { name: "Newsletter" },
+        status: "APPLIED",
+        actionItems: [
+          { type: "LABEL", label: "News", delayInMinutes: null },
+          { type: "ARCHIVE", label: null, delayInMinutes: 1440 },
+        ],
+      },
+    ] as never);
+
+    const result = await runRulesForMcp({
+      userId: "user_1",
+      messageId: "message-1",
+      apply: true,
+      logger,
+    });
+
+    expect(result.summary).toBe(
+      'Ran the rule "Newsletter" (label "News"); scheduled for later: archive.',
     );
   });
 
@@ -998,8 +1098,10 @@ describe("MCP email tools", () => {
         it("refuses to delete a folder emptied one email at a time with update_thread", async () => {
           mockOutlook();
           await listFoldersForMcp({ userId: "user_1", logger });
+          // The thread sits outside Receipts, so only the earlier list or
+          // search records Receipts; update_thread's own record can't.
           vi.mocked(createEmailProvider).mockResolvedValue({
-            getThreadFolderIds: vi.fn().mockResolvedValue([]),
+            getThreadFolderIds: vi.fn().mockResolvedValue(["inbox"]),
             trashThread: vi.fn().mockResolvedValue(undefined),
           } as never);
           await updateThreadForMcp({
@@ -1042,8 +1144,10 @@ describe("MCP email tools", () => {
             query: "receipt",
             logger,
           });
+          // The thread sits outside Receipts, so only the earlier list or
+          // search records Receipts; update_thread's own record can't.
           vi.mocked(createEmailProvider).mockResolvedValue({
-            getThreadFolderIds: vi.fn().mockResolvedValue([]),
+            getThreadFolderIds: vi.fn().mockResolvedValue(["inbox"]),
             trashThread: vi.fn().mockResolvedValue(undefined),
           } as never);
           await updateThreadForMcp({

@@ -13,6 +13,7 @@ import {
   untrashThread,
   updateMessageCategories,
 } from "./label";
+import { OutlookThreadNotFoundError } from "./thread-helpers";
 
 const mockGetFolderIds = vi.fn();
 
@@ -157,9 +158,116 @@ describe("archiveThread", () => {
 
     expect(post).not.toHaveBeenCalled();
   });
+
+  it("fails instead of reporting success when the thread has no messages", async () => {
+    const { client, post } = createPagingClient([{ value: [] }]);
+
+    await expect(archive(client)).rejects.toBeInstanceOf(
+      OutlookThreadNotFoundError,
+    );
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("fails when the filter fails and the fallback finds no messages", async () => {
+    const { client, post } = createPagingClient([
+      { error: new Error("Invalid filter clause") },
+      { value: [] },
+    ]);
+
+    await expect(archive(client)).rejects.toBeInstanceOf(
+      OutlookThreadNotFoundError,
+    );
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("fails when every message move fails", async () => {
+    const { client, post } = createPagingClient([
+      { value: [{ id: "m1" }, { id: "m2" }] },
+    ]);
+    post.mockRejectedValue(new Error("Mailbox is read-only"));
+
+    await expect(archive(client)).rejects.toThrow("Mailbox is read-only");
+  });
+
+  it("fails as not found when Graph says every message is gone", async () => {
+    const { client, post } = createPagingClient([{ value: [{ id: "m1" }] }]);
+    post.mockRejectedValue(new Error("Requested entity was not found."));
+
+    await expect(archive(client)).rejects.toBeInstanceOf(
+      OutlookThreadNotFoundError,
+    );
+  });
+
+  it("still succeeds when only some message moves fail", async () => {
+    const { client, post } = createPagingClient([
+      { value: [{ id: "m1" }, { id: "m2" }] },
+    ]);
+    post.mockRejectedValueOnce(new Error("Throttled"));
+
+    await expect(archive(client)).resolves.toEqual({ status: 200 });
+  });
+
+  it("fails without moving anything when a custom destination folder is missing", async () => {
+    const { client, post } = createPagingClient([
+      { error: new Error("The specified folder could not be found") },
+    ]);
+
+    await expect(
+      archiveThread({
+        client,
+        threadId: "thread-1",
+        ownerEmail: "user@example.com",
+        actionSource: "automation",
+        folderId: "custom-folder-id",
+        logger: createTestLogger(),
+      }),
+    ).rejects.toThrow("Destination folder not found; nothing was moved.");
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  function archive(client: OutlookClient) {
+    return archiveThread({
+      client,
+      threadId: "thread-1",
+      ownerEmail: "user@example.com",
+      actionSource: "user",
+      logger: createTestLogger(),
+    });
+  }
 });
 
 describe("markReadThread", () => {
+  it("fails instead of reporting success when the thread has no messages", async () => {
+    const { client, patch } = createPagingClient([{ value: [] }]);
+
+    await expect(
+      markReadThread({
+        client,
+        threadId: "thread-1",
+        read: true,
+        logger: createTestLogger(),
+      }),
+    ).rejects.toBeInstanceOf(OutlookThreadNotFoundError);
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it("fails when the filter fails and the fallback finds no messages", async () => {
+    const { client, patch } = createPagingClient([
+      { error: new Error("Invalid filter clause") },
+      { value: [] },
+    ]);
+
+    await expect(
+      markReadThread({
+        client,
+        threadId: "thread-1",
+        read: false,
+        logger: createTestLogger(),
+      }),
+    ).rejects.toBeInstanceOf(OutlookThreadNotFoundError);
+    expect(patch).not.toHaveBeenCalled();
+  });
+
   it("marks every message read in a thread that spans more than one page", async () => {
     const { client, patch, patchedPaths } = createPagingClient([
       { value: [{ id: "m1" }], next: SECOND_PAGE_LINK },

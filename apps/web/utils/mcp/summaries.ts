@@ -98,7 +98,9 @@ export function updateThreadSummary({
     case "archive":
       return "Archived 1 conversation; unarchive moves it back.";
     case "unarchive":
-      return "Moved 1 conversation back to the Inbox.";
+      // Outlook moves only what sits in Archive, and a thread with nothing
+      // there is left alone, so this states the end state rather than a move.
+      return "The conversation has nothing left in Archive; anything that was there is back in the Inbox.";
     case "trash":
       return `Moved 1 conversation to ${trashFolder}; it can be restored.`;
     case "mark_read":
@@ -117,7 +119,8 @@ export function labelThreadSummary({
   removed: boolean;
   messages?: number;
 }) {
-  if (removed) return `Removed the label "${labelName}" from 1 conversation.`;
+  if (removed)
+    return `The conversation no longer has the label "${labelName}".`;
   if (messages === 0)
     return `Added nothing: the conversation has no messages, so the label "${labelName}" was not added.`;
   return `Added the label "${labelName}" to ${count(messages, "message")} in 1 conversation.`;
@@ -143,14 +146,7 @@ export function runRulesSummary({
   results: RuleResult[];
 }) {
   const handled = results.filter((result) => result.alreadyProcessed);
-  if (handled.length > 0)
-    return handled
-      .map((result) =>
-        result.ruleName
-          ? `Already handled earlier by the rule "${result.ruleName}" (${describeActions(result.actions)}); nothing ran again.`
-          : "Already handled earlier: no rule matched this email; nothing ran again.",
-      )
-      .join(" ");
+  if (handled.length > 0) return handled.map(handledRuleSentence).join(" ");
 
   const matched = results.filter((result) => result.ruleName);
   if (preview) {
@@ -189,6 +185,7 @@ type RuleResult = {
     type: string;
     label: string | null;
     folderName: string | null;
+    delayInMinutes?: number | null;
   }>;
 };
 
@@ -231,16 +228,48 @@ function appliedRuleSentence(result: RuleResult) {
       return `The rule "${result.ruleName}" matched but failed while running (${actions}); some of it may have gone through.`;
     case "SKIPPED":
       return `The rule "${result.ruleName}" matched but was skipped; nothing changed.`;
+  }
+
+  const delayed = result.actions.filter(isDelayed);
+  if (delayed.length > 0) {
+    const ran = result.actions.filter((action) => !isDelayed(action));
+    const later = delayed.map(describeAction).join(", ");
+    if (ran.length === 0)
+      return `Started the rule "${result.ruleName}"; scheduled for later: ${later}.`;
+    return `Ran the rule "${result.ruleName}" (${ran.map(describeAction).join(", ")}); scheduled for later: ${later}.`;
+  }
+  if (result.status === "APPLYING")
+    return `Started the rule "${result.ruleName}" (${actions}); some of its actions are scheduled for later.`;
+  return `Ran the rule "${result.ruleName}" (${actions}).`;
+}
+
+function handledRuleSentence(result: RuleResult) {
+  if (!result.ruleName)
+    return "Already handled earlier: no rule matched this email; nothing ran again.";
+  const actions = describeActions(result.actions);
+  switch (result.status) {
+    case "ERROR":
+      return `The rule "${result.ruleName}" already ran on this email earlier and failed (${actions}); some of it may have gone through, and nothing ran again.`;
     case "APPLYING":
-      return `Started the rule "${result.ruleName}" (${actions}); some of its actions are scheduled for later.`;
+      return `The rule "${result.ruleName}" already started on this email earlier (${actions}); some of its actions are scheduled for later, and nothing ran again.`;
+    case "SKIPPED":
+      return `The rule "${result.ruleName}" matched this email earlier but was skipped; nothing ran again.`;
     default:
-      return `Ran the rule "${result.ruleName}" (${actions}).`;
+      return `Already handled earlier by the rule "${result.ruleName}" (${actions}); nothing ran again.`;
   }
 }
 
+// Delayed actions are only scheduled when a rule runs, so they are marked
+// "later" wherever actions are listed, and never counted as done.
 function describeActions(actions: RuleResult["actions"]) {
   if (actions.length === 0) return "no actions";
-  return actions.map(describeAction).join(", ");
+  return actions
+    .map((action) =>
+      isDelayed(action)
+        ? `${describeAction(action)} later`
+        : describeAction(action),
+    )
+    .join(", ");
 }
 
 function describeAction({ type, label, folderName }: RuleResult["actions"][0]) {
@@ -248,6 +277,10 @@ function describeAction({ type, label, folderName }: RuleResult["actions"][0]) {
   if (type === "MOVE_FOLDER" && folderName)
     return `move to the folder ${folderName}`;
   return ACTION_PHRASES[type] ?? type.toLowerCase().replaceAll("_", " ");
+}
+
+function isDelayed(action: RuleResult["actions"][0]) {
+  return (action.delayInMinutes ?? 0) > 0;
 }
 
 const ACTION_PHRASES: Record<string, string> = {

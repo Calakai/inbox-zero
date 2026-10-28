@@ -29,6 +29,7 @@ import {
   markFoldersSeenHoldingMail,
   wasFolderRecentlyHeldMail,
 } from "@/utils/redis/mcp-folder-held-mail";
+import { OutlookThreadNotFoundError } from "@/utils/outlook/thread-helpers";
 import { textToHtmlParagraphs } from "@/utils/string";
 import type { EmailProvider } from "@/utils/email/types";
 import type { Logger } from "@/utils/logger";
@@ -414,6 +415,11 @@ export async function updateThreadForMcp({
         "Not moved: could not check which folders this thread is in for the delete check; nothing was moved.",
       );
     }
+    // The Outlook moves skip a thread with no messages without failing.
+    if (folderIds.length === 0)
+      throw new SafeError(
+        "Not moved: the conversation was not found or has no messages; nothing was moved.",
+      );
     const recorded = await Promise.all(
       folderIds.map((folderId) =>
         markFolderHeldMail({
@@ -429,13 +435,24 @@ export async function updateThreadForMcp({
       );
   }
 
-  if (action === "archive")
-    await emailProvider.archiveThread(threadId, emailAccount.email);
-  else if (action === "unarchive")
-    await emailProvider.unarchiveThread(threadId);
-  else if (action === "trash")
-    await emailProvider.trashThread(threadId, emailAccount.email, "automation");
-  else await emailProvider.markReadThread(threadId, action === "mark_read");
+  try {
+    if (action === "archive")
+      await emailProvider.archiveThread(threadId, emailAccount.email);
+    else if (action === "unarchive")
+      await emailProvider.unarchiveThread(threadId);
+    else if (action === "trash")
+      await emailProvider.trashThread(
+        threadId,
+        emailAccount.email,
+        "automation",
+      );
+    else await emailProvider.markReadThread(threadId, action === "mark_read");
+  } catch (error) {
+    // Nothing changed, so it reaches the client as a refusal.
+    if (error instanceof OutlookThreadNotFoundError)
+      throw new SafeError(error.message);
+    throw error;
+  }
 
   return {
     summary: updateThreadSummary({
@@ -983,6 +1000,7 @@ export async function runRulesForMcp({
       type: item.type,
       label: item.label ?? null,
       folderName: item.folderName ?? null,
+      ...(item.delayInMinutes ? { delayInMinutes: item.delayInMinutes } : {}),
     })),
   }));
 

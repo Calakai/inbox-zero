@@ -11,6 +11,7 @@ import {
 import { sleep } from "@/utils/sleep";
 import {
   listThreadMessages,
+  OutlookThreadNotFoundError,
   OutlookThreadPaginationError,
   processThreadMessagesFallback,
   runThreadMessageMutation,
@@ -396,15 +397,12 @@ export async function archiveThread({
     try {
       await client.getClient().api(`/me/mailFolders/${folderId}`).get();
     } catch (error) {
-      logger.warn(
-        "Custom destination folder not found, skipping archive operation",
-        {
-          folderId,
-          threadId,
-          error,
-        },
-      );
-      return;
+      logger.warn("Custom destination folder not found", {
+        folderId,
+        threadId,
+        error,
+      });
+      throw new Error("Destination folder not found; nothing was moved.");
     }
   }
 
@@ -430,6 +428,7 @@ export async function archiveThread({
       filterError: error,
     });
   }
+  if (messages.length === 0) throw new OutlookThreadNotFoundError();
 
   const archivePromise = runThreadMessageMutation({
     messageIds: messages.map((message) => message.id),
@@ -445,6 +444,7 @@ export async function archiveThread({
       ),
     failureMessage: "Failed to move message to folder",
     continueOnError: true,
+    throwIfAllFail: true,
   });
 
   const publishPromise = publishArchive({
@@ -473,7 +473,7 @@ export async function archiveThread({
     const error = archiveResult.reason;
     if (error.message?.includes("Requested entity was not found")) {
       logger.warn("Thread not found", { threadId, userEmail: ownerEmail });
-      return { status: 404, message: "Thread not found" };
+      throw new OutlookThreadNotFoundError();
     }
     logger.error("Failed to move thread to folder", {
       folderId,
@@ -610,6 +610,7 @@ export async function markReadThread({
       select: "id",
       logger,
     });
+    if (messages.length === 0) throw new OutlookThreadNotFoundError();
 
     await runThreadMessageMutation({
       messageIds: messages.map((message) => message.id),
@@ -626,7 +627,11 @@ export async function markReadThread({
       failureMessage: "Failed to mark message as read",
     });
   } catch (error) {
-    if (error instanceof OutlookThreadPaginationError) throw error;
+    if (
+      error instanceof OutlookThreadPaginationError ||
+      error instanceof OutlookThreadNotFoundError
+    )
+      throw error;
     // If the filter fails, try a different approach
     logger.warn("Filter failed, trying alternative approach", {
       threadId,
@@ -634,7 +639,7 @@ export async function markReadThread({
     });
 
     try {
-      await processThreadMessagesFallback({
+      const found = await processThreadMessagesFallback({
         client,
         threadId,
         logger,
@@ -650,6 +655,7 @@ export async function markReadThread({
         noMessagesMessage:
           "No messages found for conversationId, skipping mark read",
       });
+      if (found === 0) throw new OutlookThreadNotFoundError();
     } catch (directError) {
       logger.error("Failed to mark message as read", {
         threadId,
@@ -769,7 +775,7 @@ async function archiveThreadWithFallback({
   });
 
   try {
-    await processThreadMessagesFallback({
+    const found = await processThreadMessagesFallback({
       client,
       threadId,
       logger,
@@ -784,7 +790,9 @@ async function archiveThreadWithFallback({
         ),
       noMessagesMessage:
         "No messages found for conversationId, skipping folder move",
+      throwIfAllFail: true,
     });
+    if (found === 0) throw new OutlookThreadNotFoundError();
 
     try {
       await publishArchive({

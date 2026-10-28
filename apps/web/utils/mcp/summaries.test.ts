@@ -289,7 +289,11 @@ describe("updateThreadSummary", () => {
       "Deleted Items",
       "Archived 1 conversation; unarchive moves it back.",
     ],
-    ["unarchive", "Deleted Items", "Moved 1 conversation back to the Inbox."],
+    [
+      "unarchive",
+      "Deleted Items",
+      "The conversation has nothing left in Archive; anything that was there is back in the Inbox.",
+    ],
     [
       "trash",
       "Deleted Items",
@@ -323,7 +327,7 @@ describe("labelThreadSummary", () => {
     [
       "removed",
       { labelName: "FYI", removed: true },
-      'Removed the label "FYI" from 1 conversation.',
+      'The conversation no longer has the label "FYI".',
     ],
   ])("%s", (_case, input, expected) => {
     expect(labelThreadSummary(input)).toBe(expected);
@@ -353,6 +357,15 @@ describe("runRulesSummary", () => {
       { type: "ARCHIVE", label: null, folderName: null },
     ],
   };
+  const withDelayedArchive = [
+    {
+      type: "LABEL",
+      label: "Receipts",
+      folderName: null,
+      delayInMinutes: null,
+    },
+    { type: "ARCHIVE", label: null, folderName: null, delayInMinutes: 60 },
+  ];
   const noMatch = {
     ruleName: null,
     alreadyProcessed: false,
@@ -421,6 +434,30 @@ describe("runRulesSummary", () => {
       'Already handled earlier by the rule "Receipts" (label "Receipts", archive); nothing ran again.',
     ],
     [
+      "already handled, and it failed then",
+      {
+        preview: false,
+        results: [{ ...receipts, status: "ERROR", alreadyProcessed: true }],
+      },
+      'The rule "Receipts" already ran on this email earlier and failed (label "Receipts", archive); some of it may have gone through, and nothing ran again.',
+    ],
+    [
+      "already handled, and its actions are still scheduled",
+      {
+        preview: false,
+        results: [{ ...receipts, status: "APPLYING", alreadyProcessed: true }],
+      },
+      'The rule "Receipts" already started on this email earlier (label "Receipts", archive); some of its actions are scheduled for later, and nothing ran again.',
+    ],
+    [
+      "already handled, and it was skipped then",
+      {
+        preview: false,
+        results: [{ ...receipts, status: "SKIPPED", alreadyProcessed: true }],
+      },
+      'The rule "Receipts" matched this email earlier but was skipped; nothing ran again.',
+    ],
+    [
       "already handled, during a preview",
       {
         preview: true,
@@ -440,6 +477,55 @@ describe("runRulesSummary", () => {
         results: [{ ...receipts, actions: [], status: "APPLIED" }],
       },
       'Ran the rule "Receipts" (no actions).',
+    ],
+    [
+      "ran, with a delayed action",
+      {
+        preview: false,
+        results: [
+          { ...receipts, actions: withDelayedArchive, status: "APPLIED" },
+        ],
+      },
+      'Ran the rule "Receipts" (label "Receipts"); scheduled for later: archive.',
+    ],
+    [
+      "started, with only delayed actions",
+      {
+        preview: false,
+        results: [
+          {
+            ...receipts,
+            actions: [withDelayedArchive[1]],
+            status: "APPLYING",
+          },
+        ],
+      },
+      'Started the rule "Receipts"; scheduled for later: archive.',
+    ],
+    [
+      "preview, with a delayed action",
+      {
+        preview: true,
+        results: [
+          { ...receipts, actions: withDelayedArchive, status: "APPLIED" },
+        ],
+      },
+      'Preview only, nothing changed: the rule "Receipts" would match (label "Receipts", archive later).',
+    ],
+    [
+      "already handled, with a delayed action",
+      {
+        preview: false,
+        results: [
+          {
+            ...receipts,
+            actions: withDelayedArchive,
+            status: "APPLIED",
+            alreadyProcessed: true,
+          },
+        ],
+      },
+      'Already handled earlier by the rule "Receipts" (label "Receipts", archive later); nothing ran again.',
     ],
   ])("%s", (_case, input, expected) => {
     expect(runRulesSummary(input)).toBe(expected);
