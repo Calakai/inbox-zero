@@ -144,7 +144,7 @@ export async function handleMcpServerRequest(
     {
       title: "Search inbox",
       description:
-        "Search one inbox, or one Outlook folder by folder name or folderId, and return message metadata and snippets. Does not return full message bodies, send email, or change mail.",
+        "Search one inbox, or one Outlook folder by folder name or folderId, and return message metadata and snippets. Does not return full message bodies, send email, or change mail. Results may carry amounts (currency amounts as written in the email) and dueDate (a stated due or payment date, as written); each is left out when the email states none.",
       inputSchema: searchInboxInputShape,
       annotations: { ...mailboxReadAnnotations, title: "Search inbox" },
     },

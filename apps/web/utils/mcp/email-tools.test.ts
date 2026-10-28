@@ -107,6 +107,70 @@ describe("MCP email tools", () => {
     expect(JSON.stringify(result)).not.toContain("SECRET BODY");
   });
 
+  it("adds amounts and the due date from the body without returning the body", async () => {
+    vi.mocked(createEmailProvider).mockResolvedValue({
+      searchMessages: vi.fn().mockResolvedValue({
+        messages: [
+          message({
+            subject: "Your October statement",
+            snippet: "Your statement is ready.",
+            textPlain:
+              "SECRET BODY. Statement balance: $1,284.17. Due date: November 18.",
+          }),
+        ],
+      }),
+    } as never);
+
+    const result = await searchInboxForMcp({
+      userId: "user_1",
+      query: "from:bank@example.com",
+      logger,
+    });
+
+    expect(result.messages[0]).toMatchObject({
+      amounts: ["$1,284.17"],
+      dueDate: "November 18",
+    });
+    expect(JSON.stringify(result)).not.toContain("SECRET BODY");
+  });
+
+  it("leaves amounts and dueDate out when the email states none", async () => {
+    vi.mocked(createEmailProvider).mockResolvedValue({
+      searchMessages: vi.fn().mockResolvedValue({ messages: [message()] }),
+    } as never);
+
+    const result = await searchInboxForMcp({
+      userId: "user_1",
+      query: "from:contact@example.com",
+      logger,
+    });
+
+    expect(result.messages[0]).not.toHaveProperty("amounts");
+    expect(result.messages[0]).not.toHaveProperty("dueDate");
+  });
+
+  it("finds an amount inside an HTML table", async () => {
+    vi.mocked(createEmailProvider).mockResolvedValue({
+      searchMessages: vi.fn().mockResolvedValue({
+        messages: [
+          message({
+            snippet: "Your receipt",
+            textPlain: undefined,
+            textHtml: "<table><tr><td>Total</td><td>$84.12</td></tr></table>",
+          }),
+        ],
+      }),
+    } as never);
+
+    const result = await searchInboxForMcp({
+      userId: "user_1",
+      query: "receipt",
+      logger,
+    });
+
+    expect(result.messages[0]).toMatchObject({ amounts: ["$84.12"] });
+  });
+
   it("lists one folder's mail when given a folderId and no query", async () => {
     const searchMessages = vi.fn().mockResolvedValue({ messages: [message()] });
     vi.mocked(resolveMcpEmailAccount).mockResolvedValue({
