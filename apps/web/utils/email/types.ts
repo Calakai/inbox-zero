@@ -375,6 +375,8 @@ export interface EmailProvider {
   getSignatures(): Promise<EmailSignature[]>;
   // Thread messages are returned in chronological order with drafts excluded unless requested.
   getThread(threadId: string, options?: GetThreadOptions): Promise<EmailThread>;
+  // Folders the thread's messages sit in. Gmail has labels, not folders.
+  getThreadFolderIds(threadId: string): Promise<string[]>;
   getThreadMessages(threadId: string): Promise<ParsedMessage[]>;
   getThreadMessagesInInbox(threadId: string): Promise<ParsedMessage[]>;
   getThreads(folderId?: string): Promise<EmailThread[]>;

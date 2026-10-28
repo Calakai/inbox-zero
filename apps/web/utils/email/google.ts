@@ -1285,6 +1285,10 @@ export class GmailProvider implements EmailProvider {
     );
   }
 
+  async getThreadFolderIds(_threadId: string): Promise<string[]> {
+    return [];
+  }
+
   async getPreviousConversationMessages(
     messageIds: string[],
   ): Promise<ParsedMessage[]> {

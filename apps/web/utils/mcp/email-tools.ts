@@ -355,6 +355,27 @@ export async function updateThreadForMcp({
     logger,
   });
 
+  // Archive, unarchive and trash move every message in the conversation, so
+  // they can empty a folder no tool showed the model. Record where the thread
+  // sits before moving it, or delete_folder would remove that folder unasked.
+  if (
+    isMicrosoftProvider(emailAccount.provider) &&
+    action !== "mark_read" &&
+    action !== "mark_unread"
+  ) {
+    const folderIds = await emailProvider
+      .getThreadFolderIds(threadId)
+      .catch((error) => {
+        logger.warn("Could not read the folders a thread sits in", { error });
+        return [];
+      });
+    await markFoldersSeenHoldingMail({
+      emailAccountId: emailAccount.id,
+      folderIds,
+      logger,
+    });
+  }
+
   if (action === "archive")
     await emailProvider.archiveThread(threadId, emailAccount.email);
   else if (action === "unarchive")

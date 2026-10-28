@@ -1127,6 +1127,25 @@ export class OutlookProvider implements EmailProvider {
     }
   }
 
+  async getThreadFolderIds(threadId: string): Promise<string[]> {
+    const messages = await listThreadMessages<{
+      id: string;
+      parentFolderId?: string;
+    }>({
+      client: this.client,
+      threadId,
+      select: "id,parentFolderId",
+      logger: this.logger,
+    });
+    return [
+      ...new Set(
+        messages.flatMap(({ parentFolderId }) =>
+          parentFolderId ? [parentFolderId] : [],
+        ),
+      ),
+    ];
+  }
+
   async getPreviousConversationMessages(
     messageIds: string[],
   ): Promise<ParsedMessage[]> {
