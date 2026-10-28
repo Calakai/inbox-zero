@@ -886,6 +886,7 @@ describe("MCP email tools", () => {
           mockOutlook();
           await listFoldersForMcp({ userId: "user_1", logger });
           vi.mocked(createEmailProvider).mockResolvedValue({
+            getThreadFolderIds: vi.fn().mockResolvedValue([]),
             trashThread: vi.fn().mockResolvedValue(undefined),
           } as never);
           await updateThreadForMcp({
@@ -929,6 +930,7 @@ describe("MCP email tools", () => {
             logger,
           });
           vi.mocked(createEmailProvider).mockResolvedValue({
+            getThreadFolderIds: vi.fn().mockResolvedValue([]),
             trashThread: vi.fn().mockResolvedValue(undefined),
           } as never);
           await updateThreadForMcp({
@@ -957,6 +959,122 @@ describe("MCP email tools", () => {
             logger,
           });
           expect(deleteFolder).toHaveBeenCalledWith("receipts");
+        });
+
+        it.each([
+          ["archive", "archiveThread"],
+          ["unarchive", "unarchiveThread"],
+          ["trash", "trashThread"],
+        ] as const)("refuses to delete a folder that update_thread %s emptied by moving the whole conversation", async (action, method) => {
+          vi.mocked(resolveMcpEmailAccount).mockResolvedValue(outlookAccount);
+          const calls: string[] = [];
+          const getThreadFolderIds = vi.fn(async () => {
+            calls.push("read");
+            return ["inbox", "receipts"];
+          });
+          vi.mocked(createEmailProvider).mockResolvedValue({
+            getThreadFolderIds,
+            [method]: vi.fn(async () => {
+              calls.push("move");
+            }),
+          } as never);
+          await updateThreadForMcp({
+            userId: "user_1",
+            threadId: "ta",
+            action,
+            logger,
+          });
+          expect(getThreadFolderIds).toHaveBeenCalledWith("ta");
+          expect(calls).toEqual(["read", "move"]);
+          const { deleteFolder } = mockOutlook([
+            folder({ id: "receipts", displayName: "Receipts" }),
+          ]);
+
+          await expect(
+            deleteFolderForMcp({
+              userId: "user_1",
+              folderId: "receipts",
+              logger,
+            }),
+          ).rejects.toThrow(heldMessage("Receipts"));
+          expect(deleteFolder).not.toHaveBeenCalled();
+
+          await deleteFolderForMcp({
+            userId: "user_1",
+            folderId: "receipts",
+            userConfirmed: true,
+            logger,
+          });
+          expect(deleteFolder).toHaveBeenCalledWith("receipts");
+        });
+
+        it("moves nothing when the thread's folders can't be read", async () => {
+          vi.mocked(resolveMcpEmailAccount).mockResolvedValue(outlookAccount);
+          const archiveThread = vi.fn().mockResolvedValue(undefined);
+          vi.mocked(createEmailProvider).mockResolvedValue({
+            getThreadFolderIds: vi.fn().mockRejectedValue(new Error("429")),
+            archiveThread,
+          } as never);
+
+          await expect(
+            updateThreadForMcp({
+              userId: "user_1",
+              threadId: "ta",
+              action: "archive",
+              logger,
+            }),
+          ).rejects.toThrow("nothing was moved");
+          expect(archiveThread).not.toHaveBeenCalled();
+        });
+
+        it("moves nothing when the thread's folders can't be recorded", async () => {
+          vi.mocked(resolveMcpEmailAccount).mockResolvedValue(outlookAccount);
+          vi.mocked(redis.set).mockRejectedValue(new Error("redis down"));
+          const trashThread = vi.fn().mockResolvedValue(undefined);
+          vi.mocked(createEmailProvider).mockResolvedValue({
+            getThreadFolderIds: vi.fn().mockResolvedValue(["receipts"]),
+            trashThread,
+          } as never);
+
+          await expect(
+            updateThreadForMcp({
+              userId: "user_1",
+              threadId: "ta",
+              action: "trash",
+              logger,
+            }),
+          ).rejects.toThrow("nothing was moved");
+          expect(trashThread).not.toHaveBeenCalled();
+        });
+
+        it("does not read the thread's folders to mark it read, or for Gmail", async () => {
+          const getThreadFolderIds = vi.fn().mockResolvedValue(["receipts"]);
+          vi.mocked(resolveMcpEmailAccount).mockResolvedValue(outlookAccount);
+          vi.mocked(createEmailProvider).mockResolvedValue({
+            getThreadFolderIds,
+            markReadThread: vi.fn(),
+          } as never);
+          await updateThreadForMcp({
+            userId: "user_1",
+            threadId: "ta",
+            action: "mark_read",
+            logger,
+          });
+
+          vi.mocked(resolveMcpEmailAccount).mockResolvedValue(emailAccount);
+          vi.mocked(createEmailProvider).mockResolvedValue({
+            getThreadFolderIds,
+            archiveThread: vi.fn(),
+          } as never);
+          await updateThreadForMcp({
+            userId: "user_1",
+            threadId: "ta",
+            action: "archive",
+            logger,
+          });
+
+          expect(getThreadFolderIds).not.toHaveBeenCalled();
+          expect(redis.set).not.toHaveBeenCalled();
         });
 
         it("records a folder when delete_folder refuses because it still holds mail", async () => {

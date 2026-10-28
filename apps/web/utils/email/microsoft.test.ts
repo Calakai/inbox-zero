@@ -98,6 +98,37 @@ describe("OutlookProvider.getAttachment", () => {
   });
 });
 
+describe("OutlookProvider.getThreadFolderIds", () => {
+  it("reads every folder the conversation sits in with one call", async () => {
+    const client = createMockOutlookClient([], {
+      responsesByApiPath: {
+        "/me/messages": {
+          value: [
+            createMessage({ id: "m1", parentFolderId: "inbox-folder-id" }),
+            createMessage({ id: "m2", parentFolderId: "receipts" }),
+            createMessage({ id: "m3", parentFolderId: "receipts" }),
+            createMessage({ id: "m4", parentFolderId: undefined }),
+          ],
+        },
+      },
+    });
+    const provider = new OutlookProvider(client, createTestLogger());
+
+    await expect(provider.getThreadFolderIds("conv-1")).resolves.toEqual([
+      "inbox-folder-id",
+      "receipts",
+    ]);
+    expect(client.getRequestLog()).toEqual([
+      {
+        apiPath: "/me/messages",
+        filter: "conversationId eq 'conv-1'",
+        search: undefined,
+      },
+    ]);
+    expect(client.getSelectLog()).toEqual(["id,parentFolderId"]);
+  });
+});
+
 describe("OutlookProvider.countMessages", () => {
   it.each([
     0, 7, 47,
