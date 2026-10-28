@@ -101,6 +101,7 @@ import type {
   GetThreadOptions,
   SendEmailOptions,
   DraftAttachmentUploadStart,
+  ThreadChangeOptions,
 } from "@/utils/email/types";
 import type { SendAsAddress } from "@/utils/email/send-as";
 import type { DraftAttachmentMetadata } from "@/utils/actions/draft-attachments.validation";
@@ -542,13 +543,18 @@ export class OutlookProvider implements EmailProvider {
     }));
   }
 
-  async archiveThread(threadId: string, ownerEmail: string): Promise<void> {
+  async archiveThread(
+    threadId: string,
+    ownerEmail: string,
+    options?: ThreadChangeOptions,
+  ): Promise<void> {
     await archiveThread({
       client: this.client,
       threadId,
       ownerEmail,
       actionSource: "automation",
       folderId: "archive",
+      requireChange: options?.requireChange,
       logger: this.logger,
     });
   }
@@ -1841,11 +1847,16 @@ export class OutlookProvider implements EmailProvider {
     return {};
   }
 
-  async markReadThread(threadId: string, read: boolean): Promise<void> {
+  async markReadThread(
+    threadId: string,
+    read: boolean,
+    options?: ThreadChangeOptions,
+  ): Promise<void> {
     await markReadThread({
       client: this.client,
       threadId,
       read,
+      requireChange: options?.requireChange,
       logger: this.logger,
     });
   }

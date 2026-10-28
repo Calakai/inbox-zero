@@ -373,6 +373,7 @@ export async function archiveThread({
   ownerEmail,
   actionSource,
   folderId = "archive",
+  requireChange = false,
   logger,
 }: {
   client: OutlookClient;
@@ -380,6 +381,9 @@ export async function archiveThread({
   ownerEmail: string;
   actionSource: TinybirdEmailAction["actionSource"];
   folderId?: string;
+  // Off for app callers, which treat a gone or empty thread as done. On for a
+  // caller that reports the move back, so it never claims one that didn't happen.
+  requireChange?: boolean;
   logger: Logger;
 }) {
   if (!folderId) {
@@ -397,12 +401,17 @@ export async function archiveThread({
     try {
       await client.getClient().api(`/me/mailFolders/${folderId}`).get();
     } catch (error) {
-      logger.warn("Custom destination folder not found", {
-        folderId,
-        threadId,
-        error,
-      });
-      throw new Error("Destination folder not found; nothing was moved.");
+      logger.warn(
+        "Custom destination folder not found, skipping archive operation",
+        {
+          folderId,
+          threadId,
+          error,
+        },
+      );
+      if (requireChange)
+        throw new Error("Destination folder not found; nothing was moved.");
+      return;
     }
   }
 
@@ -426,9 +435,11 @@ export async function archiveThread({
       folderId,
       logger,
       filterError: error,
+      requireChange,
     });
   }
-  if (messages.length === 0) throw new OutlookThreadNotFoundError();
+  if (requireChange && messages.length === 0)
+    throw new OutlookThreadNotFoundError();
 
   const archivePromise = runThreadMessageMutation({
     messageIds: messages.map((message) => message.id),
@@ -444,7 +455,7 @@ export async function archiveThread({
       ),
     failureMessage: "Failed to move message to folder",
     continueOnError: true,
-    throwIfAllFail: true,
+    throwIfAllFail: requireChange,
   });
 
   const publishPromise = publishArchive({
@@ -473,7 +484,8 @@ export async function archiveThread({
     const error = archiveResult.reason;
     if (error.message?.includes("Requested entity was not found")) {
       logger.warn("Thread not found", { threadId, userEmail: ownerEmail });
-      throw new OutlookThreadNotFoundError();
+      if (requireChange) throw new OutlookThreadNotFoundError();
+      return { status: 404, message: "Thread not found" };
     }
     logger.error("Failed to move thread to folder", {
       folderId,
@@ -595,11 +607,14 @@ export async function markReadThread({
   client,
   threadId,
   read,
+  requireChange = false,
   logger,
 }: {
   client: OutlookClient;
   threadId: string;
   read: boolean;
+  // See archiveThread: on only for a caller that reports the change back.
+  requireChange?: boolean;
   logger: Logger;
 }) {
   try {
@@ -610,7 +625,8 @@ export async function markReadThread({
       select: "id",
       logger,
     });
-    if (messages.length === 0) throw new OutlookThreadNotFoundError();
+    if (requireChange && messages.length === 0)
+      throw new OutlookThreadNotFoundError();
 
     await runThreadMessageMutation({
       messageIds: messages.map((message) => message.id),
@@ -655,7 +671,7 @@ export async function markReadThread({
         noMessagesMessage:
           "No messages found for conversationId, skipping mark read",
       });
-      if (found === 0) throw new OutlookThreadNotFoundError();
+      if (requireChange && found === 0) throw new OutlookThreadNotFoundError();
     } catch (directError) {
       logger.error("Failed to mark message as read", {
         threadId,
@@ -760,6 +776,7 @@ async function archiveThreadWithFallback({
   folderId,
   logger,
   filterError,
+  requireChange,
 }: {
   client: OutlookClient;
   threadId: string;
@@ -768,6 +785,7 @@ async function archiveThreadWithFallback({
   folderId: string;
   logger: Logger;
   filterError: unknown;
+  requireChange: boolean;
 }) {
   logger.warn("Filter failed, trying alternative approach", {
     threadId,
@@ -790,9 +808,9 @@ async function archiveThreadWithFallback({
         ),
       noMessagesMessage:
         "No messages found for conversationId, skipping folder move",
-      throwIfAllFail: true,
+      throwIfAllFail: requireChange,
     });
-    if (found === 0) throw new OutlookThreadNotFoundError();
+    if (requireChange && found === 0) throw new OutlookThreadNotFoundError();
 
     try {
       await publishArchive({

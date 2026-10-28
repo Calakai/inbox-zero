@@ -371,7 +371,11 @@ describe("MCP email tools", () => {
       logger,
     });
 
-    expect(archiveThread).toHaveBeenCalledWith("thread-1", "owner@example.com");
+    expect(archiveThread).toHaveBeenCalledWith(
+      "thread-1",
+      "owner@example.com",
+      { requireChange: true },
+    );
     expect(trashThread).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       summary: "Archived 1 conversation; unarchive moves it back.",
@@ -393,7 +397,9 @@ describe("MCP email tools", () => {
       logger,
     });
 
-    expect(markReadThread).toHaveBeenCalledWith("thread-1", false);
+    expect(markReadThread).toHaveBeenCalledWith("thread-1", false, {
+      requireChange: true,
+    });
     expect(result.summary).toBe("Marked 1 conversation unread.");
   });
 

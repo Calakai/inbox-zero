@@ -436,8 +436,12 @@ export async function updateThreadForMcp({
   }
 
   try {
+    // The summary claims the change, so the provider must fail rather than
+    // return quietly when nothing changed.
     if (action === "archive")
-      await emailProvider.archiveThread(threadId, emailAccount.email);
+      await emailProvider.archiveThread(threadId, emailAccount.email, {
+        requireChange: true,
+      });
     else if (action === "unarchive")
       await emailProvider.unarchiveThread(threadId);
     else if (action === "trash")
@@ -446,7 +450,10 @@ export async function updateThreadForMcp({
         emailAccount.email,
         "automation",
       );
-    else await emailProvider.markReadThread(threadId, action === "mark_read");
+    else
+      await emailProvider.markReadThread(threadId, action === "mark_read", {
+        requireChange: true,
+      });
   } catch (error) {
     // Nothing changed, so it reaches the client as a refusal.
     if (error instanceof OutlookThreadNotFoundError)

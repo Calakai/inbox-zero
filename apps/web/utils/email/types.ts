@@ -156,6 +156,13 @@ export type GetThreadOptions = {
   includeDrafts?: boolean;
 };
 
+// requireChange makes a thread change fail, instead of returning quietly, when
+// nothing changed (the thread is gone or empty, or every message failed). Only
+// a caller that reports the change back sets it.
+export type ThreadChangeOptions = {
+  requireChange?: boolean;
+};
+
 export type ProviderMailboxSearch = {
   text?: Extract<MailPredicate, { kind: "text" }>;
   mailbox:
@@ -180,7 +187,11 @@ export interface EmailProvider {
   ): Promise<DraftAttachmentsResult & { attachmentId: string }>;
   archiveMessage(messageId: string): Promise<void>;
   archiveMessages(messageIds: string[], labelId?: string): Promise<void>;
-  archiveThread(threadId: string, ownerEmail: string): Promise<void>;
+  archiveThread(
+    threadId: string,
+    ownerEmail: string,
+    options?: ThreadChangeOptions,
+  ): Promise<void>;
   archiveThreadWithLabel(
     threadId: string,
     ownerEmail: string,
@@ -421,7 +432,11 @@ export interface EmailProvider {
   ): Promise<void>;
   markNotSpam(threadId: string): Promise<void>;
   markRead(threadId: string): Promise<void>;
-  markReadThread(threadId: string, read: boolean): Promise<void>;
+  markReadThread(
+    threadId: string,
+    read: boolean,
+    options?: ThreadChangeOptions,
+  ): Promise<void>;
   markSpam(threadId: string): Promise<void>;
   moveThreadToFolder(
     threadId: string,
