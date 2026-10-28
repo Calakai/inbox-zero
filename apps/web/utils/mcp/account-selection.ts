@@ -1,4 +1,5 @@
 import type { Prisma } from "@/generated/prisma/client";
+import { SafeError } from "@/utils/error";
 import prisma from "@/utils/prisma";
 
 const mcpEmailAccountSelect = {
@@ -41,7 +42,9 @@ export async function resolveMcpEmailAccount({
   emailAddress?: string;
 }) {
   if (emailAccountId && emailAddress) {
-    throw new Error("Provide either emailAccountId or emailAddress, not both.");
+    throw new SafeError(
+      "Provide either emailAccountId or emailAddress, not both.",
+    );
   }
 
   const where = emailAccountId
@@ -58,7 +61,7 @@ export async function resolveMcpEmailAccount({
   });
 
   if (!account) {
-    throw new Error(
+    throw new SafeError(
       emailAccountId || emailAddress
         ? "Email account not found for the authenticated user."
         : "No email accounts are linked to the authenticated user.",

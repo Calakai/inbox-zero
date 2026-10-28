@@ -8,6 +8,8 @@ import type { ParsedMessage } from "@/utils/types";
 import { runRulesOnMessage } from "@/utils/ai/choose-rule/run-rules-on-message";
 import { checkRateLimit, createRateLimitKey } from "@/utils/rate-limit";
 import { redis } from "@/utils/redis";
+import { SafeError } from "@/utils/error";
+import { OutlookThreadNotFoundError } from "@/utils/outlook/thread-helpers";
 import {
   archiveFolderForMcp,
   createDraftForMcp,
@@ -323,6 +325,7 @@ describe("MCP email tools", () => {
     });
     expect(sendEmail).not.toHaveBeenCalled();
     expect(result).toMatchObject({
+      summary: "Saved a draft to contact@example.com; it was not sent.",
       draftId: "draft-1",
       sent: false,
     });
@@ -345,6 +348,8 @@ describe("MCP email tools", () => {
       expect.objectContaining({ replyToMessageId: "message-1" }),
     );
     expect(result).toMatchObject({
+      summary:
+        "Saved a reply draft to contact@example.com in the same conversation; it was not sent.",
       draftId: "draft-2",
       replyToMessageId: "message-1",
       sent: false,
@@ -366,9 +371,17 @@ describe("MCP email tools", () => {
       logger,
     });
 
-    expect(archiveThread).toHaveBeenCalledWith("thread-1", "owner@example.com");
+    expect(archiveThread).toHaveBeenCalledWith(
+      "thread-1",
+      "owner@example.com",
+      { requireChange: true },
+    );
     expect(trashThread).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ action: "archive", applied: true });
+    expect(result).toMatchObject({
+      summary: "Archived 1 conversation; unarchive moves it back.",
+      action: "archive",
+      applied: true,
+    });
   });
 
   it("marks a thread unread", async () => {
@@ -377,14 +390,17 @@ describe("MCP email tools", () => {
       markReadThread,
     } as never);
 
-    await updateThreadForMcp({
+    const result = await updateThreadForMcp({
       userId: "user_1",
       threadId: "thread-1",
       action: "mark_unread",
       logger,
     });
 
-    expect(markReadThread).toHaveBeenCalledWith("thread-1", false);
+    expect(markReadThread).toHaveBeenCalledWith("thread-1", false, {
+      requireChange: true,
+    });
+    expect(result.summary).toBe("Marked 1 conversation unread.");
   });
 
   it("moves a thread to the trash, where it can still be restored", async () => {
@@ -405,7 +421,131 @@ describe("MCP email tools", () => {
       emailAccount.email,
       "automation",
     );
-    expect(result).toMatchObject({ action: "trash", applied: true });
+    expect(result).toMatchObject({
+      summary: "Moved 1 conversation to Trash; it can be restored.",
+      action: "trash",
+      applied: true,
+    });
+  });
+
+  it("names Deleted Items when an Outlook thread goes to the trash", async () => {
+    vi.mocked(resolveMcpEmailAccount).mockResolvedValue({
+      ...emailAccount,
+      provider: "microsoft",
+    });
+    vi.mocked(createEmailProvider).mockResolvedValue({
+      getThreadFolderIds: vi.fn().mockResolvedValue(["inbox"]),
+      trashThread: vi.fn(),
+    } as never);
+
+    const result = await updateThreadForMcp({
+      userId: "user_1",
+      threadId: "thread-1",
+      action: "trash",
+      logger,
+    });
+
+    expect(result.summary).toBe(
+      "Moved 1 conversation to Deleted Items; it can be restored.",
+    );
+  });
+
+  it.each([
+    ["archive", "archiveThread"],
+    ["unarchive", "unarchiveThread"],
+    ["trash", "trashThread"],
+  ] as const)("does not claim to %s an Outlook thread that was not found", async (action, method) => {
+    vi.mocked(resolveMcpEmailAccount).mockResolvedValue({
+      ...emailAccount,
+      provider: "microsoft",
+    });
+    const move = vi.fn();
+    vi.mocked(createEmailProvider).mockResolvedValue({
+      getThreadFolderIds: vi.fn().mockResolvedValue([]),
+      [method]: move,
+    } as never);
+
+    await expect(
+      updateThreadForMcp({
+        userId: "user_1",
+        threadId: "gone",
+        action,
+        logger,
+      }),
+    ).rejects.toThrow(
+      new SafeError(
+        "Not moved: the conversation was not found or has no messages; nothing was moved.",
+      ),
+    );
+    expect(move).not.toHaveBeenCalled();
+  });
+
+  it("passes a provider's thread-not-found on as a refusal when marking read", async () => {
+    vi.mocked(resolveMcpEmailAccount).mockResolvedValue({
+      ...emailAccount,
+      provider: "microsoft",
+    });
+    vi.mocked(createEmailProvider).mockResolvedValue({
+      markReadThread: vi
+        .fn()
+        .mockRejectedValue(new OutlookThreadNotFoundError()),
+    } as never);
+
+    const error = await updateThreadForMcp({
+      userId: "user_1",
+      threadId: "gone",
+      action: "mark_read",
+      logger,
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(SafeError);
+    expect(error).toHaveProperty(
+      "message",
+      "Conversation not found or it has no messages; nothing was changed.",
+    );
+  });
+
+  it("says a removed label is no longer on the conversation", async () => {
+    vi.mocked(createEmailProvider).mockResolvedValue({
+      getLabelByName: vi.fn().mockResolvedValue({ id: "label-1", name: "FYI" }),
+      removeThreadLabel: vi.fn(),
+    } as never);
+
+    const result = await labelThreadForMcp({
+      userId: "user_1",
+      threadId: "thread-1",
+      labelName: "FYI",
+      remove: true,
+      logger,
+    });
+
+    expect(result.summary).toBe(
+      'The conversation no longer has the label "FYI".',
+    );
+  });
+
+  it("says which rule actions ran and which are scheduled for later", async () => {
+    vi.mocked(runRulesOnMessage).mockResolvedValue([
+      {
+        rule: { name: "Newsletter" },
+        status: "APPLIED",
+        actionItems: [
+          { type: "LABEL", label: "News", delayInMinutes: null },
+          { type: "ARCHIVE", label: null, delayInMinutes: 1440 },
+        ],
+      },
+    ] as never);
+
+    const result = await runRulesForMcp({
+      userId: "user_1",
+      messageId: "message-1",
+      apply: true,
+      logger,
+    });
+
+    expect(result.summary).toBe(
+      'Ran the rule "Newsletter" (label "News"); scheduled for later: archive.',
+    );
   });
 
   it("labels every message in the thread with an existing label", async () => {
@@ -418,7 +558,7 @@ describe("MCP email tools", () => {
       labelMessage,
     } as never);
 
-    await labelThreadForMcp({
+    const result = await labelThreadForMcp({
       userId: "user_1",
       threadId: "thread-1",
       labelName: "FYI",
@@ -426,6 +566,9 @@ describe("MCP email tools", () => {
     });
 
     expect(labelMessage).toHaveBeenCalledTimes(2);
+    expect(result.summary).toBe(
+      'Added the label "FYI" to 2 messages in 1 conversation.',
+    );
     expect(labelMessage).toHaveBeenCalledWith({
       messageId: "message-2",
       labelId: "label-1",
@@ -480,6 +623,8 @@ describe("MCP email tools", () => {
       }),
     );
     expect(result).toMatchObject({
+      summary:
+        'Preview only, nothing changed: the rule "Newsletter" would match (archive).',
       preview: true,
       results: [{ ruleName: "Newsletter", actions: [{ type: "ARCHIVE" }] }],
     });
@@ -621,7 +766,11 @@ describe("MCP email tools", () => {
       });
 
       expect(deleteFolder).toHaveBeenCalledWith("old");
-      expect(result).toMatchObject({ path: "Projects ⦙ Old", deleted: true });
+      expect(result).toMatchObject({
+        summary: "Deleted the empty folder Projects ⦙ Old.",
+        path: "Projects ⦙ Old",
+        deleted: true,
+      });
 
       const { rule } = vi.mocked(checkRateLimit).mock.calls[0][0];
       expect(rule.limit).toBe(2);
@@ -955,8 +1104,10 @@ describe("MCP email tools", () => {
         it("refuses to delete a folder emptied one email at a time with update_thread", async () => {
           mockOutlook();
           await listFoldersForMcp({ userId: "user_1", logger });
+          // The thread sits outside Receipts, so only the earlier list or
+          // search records Receipts; update_thread's own record can't.
           vi.mocked(createEmailProvider).mockResolvedValue({
-            getThreadFolderIds: vi.fn().mockResolvedValue([]),
+            getThreadFolderIds: vi.fn().mockResolvedValue(["inbox"]),
             trashThread: vi.fn().mockResolvedValue(undefined),
           } as never);
           await updateThreadForMcp({
@@ -999,8 +1150,10 @@ describe("MCP email tools", () => {
             query: "receipt",
             logger,
           });
+          // The thread sits outside Receipts, so only the earlier list or
+          // search records Receipts; update_thread's own record can't.
           vi.mocked(createEmailProvider).mockResolvedValue({
-            getThreadFolderIds: vi.fn().mockResolvedValue([]),
+            getThreadFolderIds: vi.fn().mockResolvedValue(["inbox"]),
             trashThread: vi.fn().mockResolvedValue(undefined),
           } as never);
           await updateThreadForMcp({
@@ -1244,9 +1397,28 @@ describe("MCP email tools", () => {
         outlookAccount.email,
       );
       expect(result).toMatchObject({
+        summary:
+          "Archived 2 of 3 emails from Receipts; 1 could not be moved and is still there.",
         path: "Receipts",
         archived: 2,
         failed: 1,
+      });
+    });
+
+    it("says an empty folder was already empty and archives nothing", async () => {
+      const { searchMessages } = mockOutlook();
+      searchMessages.mockReset().mockResolvedValue({ messages: [] });
+
+      const result = await archiveFolderForMcp({
+        userId: "user_1",
+        folderId: "receipts",
+        logger,
+      });
+
+      expect(result).toMatchObject({
+        summary: "Archived nothing: Receipts was already empty.",
+        archived: 0,
+        failed: 0,
       });
     });
 
@@ -1387,6 +1559,8 @@ describe("MCP email tools", () => {
         expect(unarchiveMessages).toHaveBeenCalledWith(["r1"]);
         expect(bulkArchiveThreads).not.toHaveBeenCalled();
         expect(result).toMatchObject({
+          summary:
+            "Moved 2 of 3 emails from Receipts to the Inbox; 1 could not be moved and is still there.",
           folderId: "receipts",
           path: "Receipts",
           moved: 2,
@@ -1404,7 +1578,12 @@ describe("MCP email tools", () => {
         });
 
         expect(unarchiveMessages).toHaveBeenCalledTimes(1);
-        expect(result).toMatchObject({ moved: 3, failed: 0 });
+        expect(result).toMatchObject({
+          summary:
+            "Moved 3 emails from Receipts to the Inbox; it is now empty.",
+          moved: 3,
+          failed: 0,
+        });
       });
 
       it.each([
@@ -1456,6 +1635,7 @@ describe("MCP email tools", () => {
           true,
         );
         expect(result).toMatchObject({
+          summary: "Marked 3 emails in Receipts read.",
           folderId: "receipts",
           path: "Receipts",
           read: true,
@@ -1503,6 +1683,7 @@ describe("MCP email tools", () => {
           true,
         );
         expect(result).toMatchObject({
+          summary: "Marked 3 emails from news@shop.example read.",
           sender: "news@shop.example",
           marked: 3,
         });
@@ -1525,7 +1706,11 @@ describe("MCP email tools", () => {
           ["r1", "r2", "r3"],
           false,
         );
-        expect(result).toMatchObject({ read: false, marked: 3 });
+        expect(result).toMatchObject({
+          summary: "Marked 3 emails in Receipts unread.",
+          read: false,
+          marked: 3,
+        });
       });
 
       it("counts the emails it could not mark", async () => {
@@ -1543,7 +1728,12 @@ describe("MCP email tools", () => {
         });
 
         expect(markMessagesReadState).toHaveBeenCalledWith(["r3"], true);
-        expect(result).toMatchObject({ marked: 2, failed: 1 });
+        expect(result).toMatchObject({
+          summary:
+            "Marked 2 of 3 emails in Receipts read; 1 could not be changed and is still unread.",
+          marked: 2,
+          failed: 1,
+        });
       });
 
       it("allows the Inbox", async () => {
@@ -1558,7 +1748,11 @@ describe("MCP email tools", () => {
         expect(searchMessages).toHaveBeenCalledWith(
           expect.objectContaining({ folderId: "inbox" }),
         );
-        expect(result).toMatchObject({ path: "Inbox", marked: 3 });
+        expect(result).toMatchObject({
+          summary: "Marked 3 emails in Inbox read.",
+          path: "Inbox",
+          marked: 3,
+        });
       });
 
       it("never moves, trashes or deletes mail and records no held folder", async () => {
@@ -1599,6 +1793,8 @@ describe("MCP email tools", () => {
         expect(searchMessages).toHaveBeenCalledTimes(50);
         expect(markMessagesReadState).toHaveBeenCalledTimes(50);
         expect(result).toMatchObject({
+          summary:
+            "Marked 1000 emails in Receipts read; more are left, so call mark_read again.",
           marked: 1000,
           failed: 0,
           moreLeft: true,
@@ -1616,7 +1812,12 @@ describe("MCP email tools", () => {
         });
 
         expect(markMessagesReadState).not.toHaveBeenCalled();
-        expect(result).toMatchObject({ marked: 0, failed: 0, moreLeft: false });
+        expect(result).toMatchObject({
+          summary: "Marked nothing: no unread emails in Receipts.",
+          marked: 0,
+          failed: 0,
+          moreLeft: false,
+        });
       });
 
       it("refuses a call with neither a folder nor a sender", async () => {

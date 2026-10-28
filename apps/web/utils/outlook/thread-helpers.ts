@@ -34,6 +34,15 @@ export class OutlookThreadPaginationError extends Error {
   }
 }
 
+// Thrown when a conversation has no messages to act on, so a caller never
+// reports a change that did not happen. Nothing was changed by then.
+export class OutlookThreadNotFoundError extends Error {
+  constructor() {
+    super("Conversation not found or it has no messages; nothing was changed.");
+    this.name = "OutlookThreadNotFoundError";
+  }
+}
+
 /**
  * Lists every message in a conversation, optionally limited to one folder.
  *
@@ -191,6 +200,8 @@ export async function processThreadMessagesFallback({
   } else {
     logger.warn(noMessagesMessage, { threadId });
   }
+
+  return threadMessages.length;
 }
 
 async function getNextThreadMessagePage<TPage>({
