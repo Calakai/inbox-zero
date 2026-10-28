@@ -1573,6 +1573,37 @@ describe("MCP email tools", () => {
         expect(createEmailProvider).not.toHaveBeenCalled();
       });
 
+      it("refuses more than one sender address", async () => {
+        mockOutlook();
+
+        await expect(
+          markReadForMcp({
+            userId: "user_1",
+            sender: "a@shop.example, b@shop.example",
+            logger,
+          }),
+        ).rejects.toThrow("one sender address");
+        expect(createEmailProvider).not.toHaveBeenCalled();
+      });
+
+      it("limits a sender to one folder when both are given", async () => {
+        const { searchMessages } = mockOutlook();
+
+        await markReadForMcp({
+          userId: "user_1",
+          folderId: "Receipts",
+          sender: "news@shop.example",
+          logger,
+        });
+
+        expect(searchMessages).toHaveBeenCalledWith(
+          expect.objectContaining({
+            folderId: "receipts",
+            fromEmail: "news@shop.example",
+          }),
+        );
+      });
+
       it("refuses Gmail accounts before touching the mailbox", async () => {
         await expect(
           markReadForMcp({

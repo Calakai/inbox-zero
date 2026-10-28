@@ -1,7 +1,7 @@
 import chunk from "lodash/chunk";
 import { z } from "zod";
 import { runRulesOnMessage } from "@/utils/ai/choose-rule/run-rules-on-message";
-import { extractEmailAddress } from "@/utils/email";
+import { extractEmailAddress, extractEmailAddresses } from "@/utils/email";
 import { createEmailProvider } from "@/utils/email/provider";
 import { isMicrosoftProvider } from "@/utils/email/provider-types";
 import { getEmailForLLM } from "@/utils/get-email-from-message";
@@ -811,6 +811,10 @@ export async function markReadForMcp({
   if (sender && !fromEmail)
     throw new Error(
       `Not marked: "${sender}" is not an email address. Find the sender's address with search_inbox first; nothing was changed.`,
+    );
+  if (sender && extractEmailAddresses(sender).length > 1)
+    throw new Error(
+      "Not marked: give one sender address per call; nothing was changed.",
     );
 
   const emailAccount = await resolveMcpEmailAccount({
