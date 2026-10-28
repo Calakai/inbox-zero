@@ -9,6 +9,7 @@ import { apiRuleSelect, serializeRule } from "@/app/api/v1/rules/serializers";
 import { ruleRequestBodySchema } from "@/app/api/v1/rules/validation";
 import { BRAND_NAME } from "@/utils/branding";
 import { createEmailProvider } from "@/utils/email/provider";
+import { SafeError } from "@/utils/error";
 import { createScopedLogger } from "@/utils/logger";
 import prisma from "@/utils/prisma";
 import { createRule, deleteRule, updateRule } from "@/utils/rule/rule";
@@ -47,9 +48,15 @@ import {
   updateThreadForMcp,
   updateThreadInputShape,
 } from "@/utils/mcp/email-tools";
+import {
+  createRuleSummary,
+  deleteRuleSummary,
+  updateRuleSummary,
+} from "@/utils/mcp/summaries";
 
 const logger = createScopedLogger("mcp-server");
 type ToolResultData = Record<string, unknown>;
+type WriteToolResultData = ToolResultData & { summary: string };
 const readOnlyAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -123,6 +130,32 @@ export async function handleMcpServerRequest(
           error: error instanceof Error ? error.message : error,
         });
         throw error;
+      }
+    };
+
+  // A write tool must say what it changed in one sentence, first, so a model
+  // that repeats it (or a client that truncates the JSON) keeps the real counts.
+  const runWriteTool =
+    (
+      name: string,
+      title: string,
+      handler: (args: Record<string, unknown>) => Promise<WriteToolResultData>,
+    ) =>
+    async (args: Record<string, unknown>) => {
+      try {
+        assertMcpScope(session.scopes, "mcp:write");
+        const { summary, ...data } = await handler(args);
+        toolLogger.info("MCP tool call", {
+          tool: name,
+          ...emailAccountLogFields(data),
+        });
+        return createToolResult({ summary, ...data });
+      } catch (error) {
+        toolLogger.warn("MCP tool failed", {
+          tool: name,
+          error: error instanceof Error ? error.message : error,
+        });
+        throw toWriteToolError(title, error);
       }
     };
 
@@ -203,7 +236,7 @@ export async function handleMcpServerRequest(
       inputSchema: createDraftInputShape,
       annotations: { ...mailboxWriteAnnotations, title: "Create draft" },
     },
-    runTool("create_draft", "mcp:write", async (args) =>
+    runWriteTool("create_draft", "Create draft", async (args) =>
       createDraftForMcp({
         userId,
         to: String(args.to),
@@ -233,7 +266,7 @@ export async function handleMcpServerRequest(
       inputSchema: updateThreadInputShape,
       annotations: { ...mailboxWriteAnnotations, title: "Update thread" },
     },
-    runTool("update_thread", "mcp:write", async (args) =>
+    runWriteTool("update_thread", "Update thread", async (args) =>
       updateThreadForMcp({
         userId,
         threadId: String(args.threadId),
@@ -258,7 +291,7 @@ export async function handleMcpServerRequest(
       inputSchema: labelThreadInputShape,
       annotations: { ...mailboxWriteAnnotations, title: "Label thread" },
     },
-    runTool("label_thread", "mcp:write", async (args) =>
+    runWriteTool("label_thread", "Label thread", async (args) =>
       labelThreadForMcp({
         userId,
         threadId: String(args.threadId),
@@ -297,7 +330,7 @@ export async function handleMcpServerRequest(
       inputSchema: archiveFolderInputShape,
       annotations: { ...mailboxWriteAnnotations, title: "Archive folder" },
     },
-    runTool("archive_folder", "mcp:write", async (args) =>
+    runWriteTool("archive_folder", "Archive folder", async (args) =>
       archiveFolderForMcp({
         userId,
         folderId: String(args.folderId),
@@ -316,7 +349,7 @@ export async function handleMcpServerRequest(
       inputSchema: markReadInputShape,
       annotations: { ...mailboxWriteAnnotations, title: "Mark read" },
     },
-    runTool("mark_read", "mcp:write", async (args) =>
+    runWriteTool("mark_read", "Mark read", async (args) =>
       markReadForMcp({
         userId,
         folderId: typeof args.folderId === "string" ? args.folderId : undefined,
@@ -340,7 +373,7 @@ export async function handleMcpServerRequest(
         title: "Move folder to inbox",
       },
     },
-    runTool("move_folder_to_inbox", "mcp:write", async (args) =>
+    runWriteTool("move_folder_to_inbox", "Move folder to inbox", async (args) =>
       moveFolderToInboxForMcp({
         userId,
         folderId: String(args.folderId),
@@ -363,7 +396,7 @@ export async function handleMcpServerRequest(
         title: "Delete folder",
       },
     },
-    runTool("delete_folder", "mcp:write", async (args) =>
+    runWriteTool("delete_folder", "Delete folder", async (args) =>
       deleteFolderForMcp({
         userId,
         folderId: String(args.folderId),
@@ -383,7 +416,7 @@ export async function handleMcpServerRequest(
       inputSchema: runRulesInputShape,
       annotations: { ...ruleWriteAnnotations, title: "Run rules" },
     },
-    runTool("run_rules", "mcp:write", async (args) =>
+    runWriteTool("run_rules", "Run rules", async (args) =>
       runRulesForMcp({
         userId,
         messageId: String(args.messageId),
@@ -442,7 +475,7 @@ export async function handleMcpServerRequest(
       });
 
       if (!rule) {
-        throw new Error("Rule not found for the selected email account.");
+        throw new SafeError("Rule not found for the selected email account.");
       }
 
       return {
@@ -463,7 +496,7 @@ export async function handleMcpServerRequest(
       },
       annotations: { ...ruleWriteAnnotations, title: "Create rule" },
     },
-    runTool("create_rule", "mcp:write", async (args) => {
+    runWriteTool("create_rule", "Create rule", async (args) => {
       const emailAccount = await resolveMcpEmailAccount({
         userId,
         ...accountSelector(args),
@@ -499,6 +532,7 @@ export async function handleMcpServerRequest(
       }
 
       return {
+        summary: createRuleSummary(storedRule.name),
         emailAccount,
         rule: serializeRule(storedRule),
       };
@@ -517,7 +551,7 @@ export async function handleMcpServerRequest(
       },
       annotations: { ...ruleWriteAnnotations, title: "Update rule" },
     },
-    runTool("update_rule", "mcp:write", async (args) => {
+    runWriteTool("update_rule", "Update rule", async (args) => {
       const emailAccount = await resolveMcpEmailAccount({
         userId,
         ...accountSelector(args),
@@ -528,7 +562,7 @@ export async function handleMcpServerRequest(
       });
 
       if (!existingRule) {
-        throw new Error("Rule not found for the selected email account.");
+        throw new SafeError("Rule not found for the selected email account.");
       }
 
       const ruleInput = toRuleWriteInput(
@@ -568,6 +602,7 @@ export async function handleMcpServerRequest(
       }
 
       return {
+        summary: updateRuleSummary(updatedRule.name),
         emailAccount,
         rule: serializeRule(updatedRule),
       };
@@ -585,18 +620,18 @@ export async function handleMcpServerRequest(
       },
       annotations: { ...destructiveAnnotations, title: "Delete rule" },
     },
-    runTool("delete_rule", "mcp:write", async (args) => {
+    runWriteTool("delete_rule", "Delete rule", async (args) => {
       const emailAccount = await resolveMcpEmailAccount({
         userId,
         ...accountSelector(args),
       });
       const existingRule = await prisma.rule.findFirst({
         where: { id: String(args.id), emailAccountId: emailAccount.id },
-        select: { groupId: true },
+        select: { groupId: true, name: true },
       });
 
       if (!existingRule) {
-        throw new Error("Rule not found for the selected email account.");
+        throw new SafeError("Rule not found for the selected email account.");
       }
 
       await deleteRule({
@@ -606,6 +641,7 @@ export async function handleMcpServerRequest(
       });
 
       return {
+        summary: deleteRuleSummary(existingRule.name),
         deleted: true,
         emailAccount,
         id: String(args.id),
@@ -727,7 +763,19 @@ function assertMcpScope(
   required: (typeof MCP_SCOPES)[number],
 ) {
   if (!scopes.includes(required))
-    throw new Error(`Missing required permission: ${required}`);
+    throw new SafeError(`Missing required permission: ${required}`);
+}
+
+// Refusals already say nothing changed, so they reach the client as written.
+// Anything else may have failed partway, so the model must not report success.
+function toWriteToolError(title: string, error: unknown) {
+  if (error instanceof SafeError || error instanceof z.ZodError) return error;
+  const message = (error instanceof Error ? error.message : String(error))
+    .trim()
+    .replace(/\.+$/, "");
+  return new Error(
+    `${title} failed: ${message}. Some changes may have gone through; check with search_inbox or list_folders before saying what changed.`,
+  );
 }
 
 function accountSelector(args: Record<string, unknown>) {

@@ -92,6 +92,8 @@ import prisma from "@/utils/__mocks__/prisma";
 import { handleMcpServerRequest } from "@/utils/mcp/server";
 import { isMcpServerEnabledForUser } from "@/utils/mcp/access";
 import { getMailClientResourceUri } from "@/utils/mcp/mail-client-bundle";
+import { createEmailProvider } from "@/utils/email/provider";
+import { SafeError } from "@/utils/error";
 
 describe("mcp-server", () => {
   beforeEach(() => {
@@ -302,6 +304,158 @@ describe("MCP tool permissions and rule writes", () => {
     expect(deleteRule).not.toHaveBeenCalled();
   });
 });
+
+describe("MCP write tool summaries", () => {
+  const unexpected = (title: string, message: string) =>
+    `${title} failed: ${message}. Some changes may have gone through; check with search_inbox or list_folders before saying what changed.`;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getMailClientResourceUri).mockReturnValue(null);
+    vi.mocked(isMcpServerEnabledForUser).mockResolvedValue(true);
+    vi.mocked(resolveMcpEmailAccount).mockResolvedValue({
+      id: "account_1",
+      email: "owner@example.com",
+      name: null,
+      provider: "google",
+    });
+    vi.mocked(toRuleWriteInput).mockReturnValue({
+      name: "Digest",
+      condition: {},
+      actions: [{ type: "ARCHIVE", fields: null }],
+      runOnThreads: false,
+    } as never);
+  });
+
+  it("a write tool's JSON starts with summary", async () => {
+    prisma.rule.findFirst.mockResolvedValueOnce({
+      groupId: null,
+      name: "Digest",
+    } as never);
+    const tool = await getTool("delete_rule", ["mcp:write"]);
+
+    const result = (await tool({ id: "rule_1" })) as ToolResult;
+
+    const json = JSON.parse(result.content[0].text);
+    expect(Object.keys(json)[0]).toBe("summary");
+    expect(json.summary).toBe('Deleted the rule "Digest".');
+    expect(Object.keys(result.structuredContent)[0]).toBe("summary");
+    expect(prisma.rule.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({ name: true }),
+      }),
+    );
+  });
+
+  it("summarizes a created and a replaced rule by its stored name", async () => {
+    vi.mocked(createRule).mockResolvedValueOnce({ id: "rule_1" } as never);
+    prisma.rule.findUnique.mockResolvedValueOnce({
+      id: "rule_1",
+      name: "Digest",
+    } as never);
+    const create = await getTool("create_rule", ["mcp:write"]);
+    const created = (await create({ rule: digestRuleBody })) as ToolResult;
+    expect(JSON.parse(created.content[0].text).summary).toBe(
+      'Created the rule "Digest".',
+    );
+
+    prisma.rule.findFirst
+      .mockResolvedValueOnce({ id: "rule_1", actions: [] } as never)
+      .mockResolvedValueOnce({ id: "rule_1", name: "Digest" } as never);
+    const update = await getTool("update_rule", ["mcp:write"]);
+    const updated = (await update({
+      id: "rule_1",
+      rule: digestRuleBody,
+    })) as ToolResult;
+    expect(JSON.parse(updated.content[0].text).summary).toBe(
+      'Replaced the rule "Digest" with the conditions and actions given.',
+    );
+  });
+
+  it("an unexpected error becomes a sentence that claims no success", async () => {
+    prisma.rule.findFirst.mockResolvedValueOnce({
+      groupId: null,
+      name: "Digest",
+    } as never);
+    vi.mocked(deleteRule).mockRejectedValueOnce(new Error("Connection reset."));
+    const deleteTool = await getTool("delete_rule", ["mcp:write"]);
+    await expect(deleteTool({ id: "rule_1" })).rejects.toHaveProperty(
+      "message",
+      unexpected("Delete rule", "Connection reset"),
+    );
+
+    vi.mocked(createEmailProvider).mockResolvedValueOnce({
+      archiveThread: vi
+        .fn()
+        .mockRejectedValue(new Error("Service unavailable")),
+    } as never);
+    const updateThread = await getTool("update_thread", ["mcp:write"]);
+    await expect(
+      updateThread({ threadId: "thread-1", action: "archive" }),
+    ).rejects.toHaveProperty(
+      "message",
+      unexpected("Update thread", "Service unavailable"),
+    );
+  });
+
+  it.each([
+    {
+      name: "a missing permission",
+      tool: "delete_rule",
+      scopes: ["mcp:read"],
+      args: { id: "rule_1" },
+      message: "Missing required permission: mcp:write",
+    },
+    {
+      name: "a rule outside the inbox",
+      tool: "delete_rule",
+      scopes: ["mcp:write"],
+      args: { id: "foreign_rule" },
+      message: "Rule not found for the selected email account.",
+    },
+    {
+      name: "a folder tool on Gmail",
+      tool: "archive_folder",
+      scopes: ["mcp:write"],
+      args: { folderId: "Receipts" },
+      message:
+        "Folders are only available for Outlook accounts. Gmail uses labels.",
+    },
+  ])("a refusal's text reaches the client unchanged: $name", async ({
+    tool: name,
+    scopes,
+    args,
+    message,
+  }) => {
+    prisma.rule.findFirst.mockResolvedValueOnce(null);
+    const tool = await getTool(name, scopes);
+    await expect(tool(args)).rejects.toHaveProperty("message", message);
+  });
+
+  it("a refusal from a paid-plan check reaches the client unchanged", async () => {
+    vi.mocked(assertCanUseDigestsIfNeeded).mockRejectedValueOnce(
+      new SafeError("Digests are available on the Plus plan.", 403),
+    );
+    const tool = await getTool("create_rule", ["mcp:write"]);
+    await expect(tool({ rule: digestRuleBody })).rejects.toHaveProperty(
+      "message",
+      "Digests are available on the Plus plan.",
+    );
+  });
+
+  it("invalid rule input is a refusal, not a partial failure", async () => {
+    const tool = await getTool("create_rule", ["mcp:write"]);
+    const error = await tool({ rule: {} }).catch((e: Error) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain("failed:");
+    expect(createRule).not.toHaveBeenCalled();
+  });
+});
+
+type ToolResult = {
+  content: { text: string }[];
+  structuredContent: Record<string, unknown>;
+};
 
 const digestRuleBody = {
   name: "Digest",

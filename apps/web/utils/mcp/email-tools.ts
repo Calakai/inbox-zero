@@ -3,11 +3,22 @@ import { z } from "zod";
 import { runRulesOnMessage } from "@/utils/ai/choose-rule/run-rules-on-message";
 import { extractEmailAddress, extractEmailAddresses } from "@/utils/email";
 import { createEmailProvider } from "@/utils/email/provider";
+import { SafeError } from "@/utils/error";
 import { isMicrosoftProvider } from "@/utils/email/provider-types";
 import { getEmailForLLM } from "@/utils/get-email-from-message";
 import { emailToContent } from "@/utils/mail";
 import { resolveMcpEmailAccount } from "@/utils/mcp/account-selection";
 import { extractMailFacts } from "@/utils/mcp/mail-facts";
+import {
+  archiveFolderSummary,
+  createDraftSummary,
+  deleteFolderSummary,
+  labelThreadSummary,
+  markReadSummary,
+  moveFolderToInboxSummary,
+  runRulesSummary,
+  updateThreadSummary,
+} from "@/utils/mcp/summaries";
 import {
   flattenOutlookFolders,
   type OutlookFolder,
@@ -211,7 +222,7 @@ export async function searchInboxForMcp({
   logger: Logger;
 }) {
   if (!query && !folderId)
-    throw new Error("Give a query or folderId to search.");
+    throw new SafeError("Give a query or folderId to search.");
 
   const emailAccount = await resolveMcpEmailAccount({
     userId,
@@ -219,7 +230,7 @@ export async function searchInboxForMcp({
     emailAddress,
   });
   if (folderId && !isMicrosoftProvider(emailAccount.provider))
-    throw new Error(
+    throw new SafeError(
       "folderId is only available for Outlook accounts. Gmail uses labels; search with a label: query instead.",
     );
 
@@ -348,6 +359,7 @@ export async function createDraftForMcp({
   }
 
   return {
+    summary: createDraftSummary({ to, reply: Boolean(replyToMessageId) }),
     emailAccount,
     draftId: draft.id,
     to,
@@ -398,7 +410,7 @@ export async function updateThreadForMcp({
       folderIds = await emailProvider.getThreadFolderIds(threadId);
     } catch (error) {
       logger.warn("Could not read the folders a thread sits in", { error });
-      throw new Error(
+      throw new SafeError(
         "Not moved: could not check which folders this thread is in for the delete check; nothing was moved.",
       );
     }
@@ -412,7 +424,7 @@ export async function updateThreadForMcp({
       ),
     );
     if (recorded.includes(false))
-      throw new Error(
+      throw new SafeError(
         "Not moved: could not record this thread's folders for the delete check; nothing was moved.",
       );
   }
@@ -425,7 +437,18 @@ export async function updateThreadForMcp({
     await emailProvider.trashThread(threadId, emailAccount.email, "automation");
   else await emailProvider.markReadThread(threadId, action === "mark_read");
 
-  return { emailAccount, threadId, action, applied: true };
+  return {
+    summary: updateThreadSummary({
+      action,
+      trashFolder: isMicrosoftProvider(emailAccount.provider)
+        ? "Deleted Items"
+        : "Trash",
+    }),
+    emailAccount,
+    threadId,
+    action,
+    applied: true,
+  };
 }
 
 export async function labelThreadForMcp({
@@ -460,11 +483,12 @@ export async function labelThreadForMcp({
   if (!label) {
     const labels = await emailProvider.getLabels();
     const names = labels.map((l) => l.name).slice(0, LABEL_NAMES_IN_ERROR);
-    throw new Error(
+    throw new SafeError(
       `Label "${labelName}" not found. Existing labels: ${names.join(", ") || "none"}.`,
     );
   }
 
+  let labelled = 0;
   if (remove) {
     await emailProvider.removeThreadLabel(threadId, label.id);
   } else {
@@ -475,10 +499,16 @@ export async function labelThreadForMcp({
         labelId: label.id,
         labelName: label.name,
       });
+      labelled++;
     }
   }
 
   return {
+    summary: labelThreadSummary({
+      labelName: label.name,
+      removed: Boolean(remove),
+      messages: labelled,
+    }),
     emailAccount,
     threadId,
     labelName: label.name,
@@ -565,7 +595,7 @@ export async function deleteFolderForMcp({
         folderIds: [folder.id],
         logger,
       });
-    throw new Error(`Not deleted: "${folder.path}" ${blocker}.`);
+    throw new SafeError(`Not deleted: "${folder.path}" ${blocker}.`);
   }
 
   // A model can empty a folder and delete it in one go, so a folder that held
@@ -578,7 +608,7 @@ export async function deleteFolderForMcp({
       logger,
     }))
   )
-    throw new Error(
+    throw new SafeError(
       `Not deleted: "${folder.path}" held email or subfolders until recently (now moved). Ask the user first; delete it only after they say yes, by calling delete_folder again with userConfirmed: true.`,
     );
 
@@ -595,7 +625,7 @@ export async function deleteFolderForMcp({
     logger,
   });
   if (budget.limited)
-    throw new Error(
+    throw new SafeError(
       `Not deleted: "${folder.path}". At most ${FOLDER_DELETE_LIMIT.limit} folders can be deleted every ${FOLDER_DELETE_LIMIT.windowSeconds / 60} minutes. Tell the user which folders are left; they can delete them in Outlook or ask again later.`,
     );
 
@@ -612,7 +642,7 @@ export async function deleteFolderForMcp({
       logger,
     }))
   )
-    throw new Error(
+    throw new SafeError(
       `Not deleted: could not record "${parent.path}" for the delete check; nothing was deleted.`,
     );
 
@@ -620,6 +650,7 @@ export async function deleteFolderForMcp({
   logger.info("Deleted empty folder via MCP", { folderId: folder.id });
 
   return {
+    summary: deleteFolderSummary(folder.path),
     emailAccount,
     folderId: folder.id,
     path: folder.path,
@@ -650,7 +681,7 @@ export async function archiveFolderForMcp({
 
   const folder = findFolder(folders, folderId);
   if (folder.systemType)
-    throw new Error(`Not archived: "${folder.path}" is a system folder.`);
+    throw new SafeError(`Not archived: "${folder.path}" is a system folder.`);
 
   const { messages, pageToken } = await collectFolderMessages(emailProvider, {
     folderId: folder.id,
@@ -675,7 +706,7 @@ export async function archiveFolderForMcp({
       logger,
     }))
   )
-    throw new Error(
+    throw new SafeError(
       `Not archived: could not record "${folder.path}" for the delete check; nothing was moved.`,
     );
 
@@ -693,13 +724,22 @@ export async function archiveFolderForMcp({
     failedThreads: failed.size,
   });
 
+  const failedCount = collected - archived;
+  const moreLeft = Boolean(pageToken);
+
   return {
+    summary: archiveFolderSummary({
+      path: folder.path,
+      archived,
+      failed: failedCount,
+      moreLeft,
+    }),
     emailAccount,
     folderId: folder.id,
     path: folder.path,
     archived,
-    failed: collected - archived,
-    moreLeft: Boolean(pageToken),
+    failed: failedCount,
+    moreLeft,
   };
 }
 
@@ -726,7 +766,7 @@ export async function moveFolderToInboxForMcp({
 
   const folder = findFolder(folders, folderId);
   if (folder.systemType)
-    throw new Error(`Not moved: "${folder.path}" is a system folder.`);
+    throw new SafeError(`Not moved: "${folder.path}" is a system folder.`);
 
   const { messages, pageToken } = await collectFolderMessages(emailProvider, {
     folderId: folder.id,
@@ -742,7 +782,7 @@ export async function moveFolderToInboxForMcp({
       logger,
     }))
   )
-    throw new Error(
+    throw new SafeError(
       `Not moved: could not record "${folder.path}" for the delete check; nothing was moved.`,
     );
 
@@ -771,19 +811,27 @@ export async function moveFolderToInboxForMcp({
       }
     }
   }
+  const failed = messages.length - moved;
+  const moreLeft = Boolean(pageToken);
   logger.info("Moved folder to inbox via MCP", {
     folderId: folder.id,
     moved,
-    failed: messages.length - moved,
+    failed,
   });
 
   return {
+    summary: moveFolderToInboxSummary({
+      path: folder.path,
+      moved,
+      failed,
+      moreLeft,
+    }),
     emailAccount,
     folderId: folder.id,
     path: folder.path,
     moved,
-    failed: messages.length - moved,
-    moreLeft: Boolean(pageToken),
+    failed,
+    moreLeft,
   };
 }
 
@@ -805,17 +853,17 @@ export async function markReadForMcp({
   logger: Logger;
 }) {
   if (!folderId && !sender)
-    throw new Error(
+    throw new SafeError(
       "Not marked: give a folderId or sender; nothing was changed.",
     );
   // An empty sender filter would match the whole mailbox.
   const fromEmail = sender ? extractEmailAddress(sender) : undefined;
   if (sender && !fromEmail)
-    throw new Error(
+    throw new SafeError(
       `Not marked: "${sender}" is not an email address. Find the sender's address with search_inbox first; nothing was changed.`,
     );
   if (sender && extractEmailAddresses(sender).length > 1)
-    throw new Error(
+    throw new SafeError(
       "Not marked: give one sender address per call; nothing was changed.",
     );
 
@@ -825,7 +873,7 @@ export async function markReadForMcp({
     emailAddress,
   });
   if (!isMicrosoftProvider(emailAccount.provider))
-    throw new Error(
+    throw new SafeError(
       "mark_read is only available for Outlook accounts. Gmail: use update_thread per thread.",
     );
 
@@ -869,22 +917,32 @@ export async function markReadForMcp({
       }
     }
   }
+  const failed = messages.length - marked;
+  const moreLeft = Boolean(pageToken);
   logger.info("Marked mail via MCP", {
     folderId: folder?.id,
     read,
     marked,
-    failed: messages.length - marked,
+    failed,
   });
 
   return {
+    summary: markReadSummary({
+      path: folder?.path,
+      sender: fromEmail,
+      read,
+      marked,
+      failed,
+      moreLeft,
+    }),
     emailAccount,
     folderId: folder?.id,
     path: folder?.path,
     sender: fromEmail,
     read,
     marked,
-    failed: messages.length - marked,
-    moreLeft: Boolean(pageToken),
+    failed,
+    moreLeft,
   };
 }
 
@@ -916,21 +974,24 @@ export async function runRulesForMcp({
     logger: logger.with({ messageId }),
   });
 
+  const ruleResults = results.map((result) => ({
+    ruleName: result.rule?.name ?? null,
+    reason: result.reason ?? null,
+    status: result.status,
+    alreadyProcessed: result.existing ?? false,
+    actions: (result.actionItems ?? []).map((item) => ({
+      type: item.type,
+      label: item.label ?? null,
+      folderName: item.folderName ?? null,
+    })),
+  }));
+
   return {
+    summary: runRulesSummary({ preview: !apply, results: ruleResults }),
     emailAccount,
     messageId,
     preview: !apply,
-    results: results.map((result) => ({
-      ruleName: result.rule?.name ?? null,
-      reason: result.reason ?? null,
-      status: result.status,
-      alreadyProcessed: result.existing ?? false,
-      actions: (result.actionItems ?? []).map((item) => ({
-        type: item.type,
-        label: item.label ?? null,
-        folderName: item.folderName ?? null,
-      })),
-    })),
+    results: ruleResults,
   };
 }
 
@@ -988,7 +1049,7 @@ async function getOutlookFoldersForMcp({
     emailAddress,
   });
   if (!isMicrosoftProvider(emailAccount.provider))
-    throw new Error(
+    throw new SafeError(
       "Folders are only available for Outlook accounts. Gmail uses labels.",
     );
 
@@ -1037,12 +1098,12 @@ function findFolder(folders: OutlookFlatFolder[], nameOrId: string) {
     );
     if (matches.length === 1) return matches[0];
     if (matches.length > 1)
-      throw new Error(
+      throw new SafeError(
         `"${nameOrId}" matches more than one folder: ${matches.map((folder) => `"${folder.path}"`).join(", ")}. Use the full path.`,
       );
   }
 
-  throw new Error(
+  throw new SafeError(
     `Folder "${nameOrId}" not found. Call list_folders for current folder names.`,
   );
 }
