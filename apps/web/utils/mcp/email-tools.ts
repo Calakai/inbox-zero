@@ -1,6 +1,7 @@
 import chunk from "lodash/chunk";
 import { z } from "zod";
 import { runRulesOnMessage } from "@/utils/ai/choose-rule/run-rules-on-message";
+import { extractEmailAddress } from "@/utils/email";
 import { createEmailProvider } from "@/utils/email/provider";
 import { isMicrosoftProvider } from "@/utils/email/provider-types";
 import { getEmailForLLM } from "@/utils/get-email-from-message";
@@ -26,6 +27,7 @@ const READ_MESSAGE_MAX_LENGTH = 4000;
 const LABEL_NAMES_IN_ERROR = 50;
 const ARCHIVE_FOLDER_MAX_MESSAGES = 1000;
 const MOVE_TO_INBOX_CHUNK_SIZE = 20;
+const MARK_READ_CHUNK_SIZE = 20;
 // Each delete takes one call, so a model that misreads a vague follow-up can
 // walk the whole folder list; the cap stops it after a couple.
 const FOLDER_DELETE_LIMIT = { limit: 2, windowSeconds: 10 * 60 };
@@ -152,6 +154,30 @@ const folderInputShape = {
 export const archiveFolderInputShape = folderInputShape;
 
 export const moveFolderToInboxInputShape = folderInputShape;
+
+export const markReadInputShape = {
+  ...mcpAccountSelectorShape,
+  folderId: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe(
+      "Folder name or folderId, as list_folders shows them; system folders such as Inbox are allowed. Give this, sender, or both.",
+    ),
+  sender: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe(
+      "One sender's exact email address, matched across the whole mailbox (or within folderId when given).",
+    ),
+  read: z
+    .boolean()
+    .optional()
+    .describe("false marks the emails unread instead; omit to mark them read."),
+};
 
 export const deleteFolderInputShape = {
   ...folderInputShape,
@@ -624,10 +650,9 @@ export async function archiveFolderForMcp({
   if (folder.systemType)
     throw new Error(`Not archived: "${folder.path}" is a system folder.`);
 
-  const { messages, pageToken } = await collectFolderMessages(
-    emailProvider,
-    folder.id,
-  );
+  const { messages, pageToken } = await collectFolderMessages(emailProvider, {
+    folderId: folder.id,
+  });
   // Only this folder's messages move, so a thread's replies elsewhere stay put.
   const threads = new Map<string, string[]>();
   for (const message of messages) {
@@ -701,10 +726,9 @@ export async function moveFolderToInboxForMcp({
   if (folder.systemType)
     throw new Error(`Not moved: "${folder.path}" is a system folder.`);
 
-  const { messages, pageToken } = await collectFolderMessages(
-    emailProvider,
-    folder.id,
-  );
+  const { messages, pageToken } = await collectFolderMessages(emailProvider, {
+    folderId: folder.id,
+  });
 
   // Recorded before anything moves: if the record fails, the folder could
   // later be deleted without the user's yes.
@@ -757,6 +781,103 @@ export async function moveFolderToInboxForMcp({
     path: folder.path,
     moved,
     failed: messages.length - moved,
+    moreLeft: Boolean(pageToken),
+  };
+}
+
+export async function markReadForMcp({
+  userId,
+  folderId,
+  sender,
+  read = true,
+  emailAccountId,
+  emailAddress,
+  logger,
+}: {
+  userId: string;
+  folderId?: string;
+  sender?: string;
+  read?: boolean;
+  emailAccountId?: string;
+  emailAddress?: string;
+  logger: Logger;
+}) {
+  if (!folderId && !sender)
+    throw new Error(
+      "Not marked: give a folderId or sender; nothing was changed.",
+    );
+  // An empty sender filter would match the whole mailbox.
+  const fromEmail = sender ? extractEmailAddress(sender) : undefined;
+  if (sender && !fromEmail)
+    throw new Error(
+      `Not marked: "${sender}" is not an email address. Find the sender's address with search_inbox first; nothing was changed.`,
+    );
+
+  const emailAccount = await resolveMcpEmailAccount({
+    userId,
+    emailAccountId,
+    emailAddress,
+  });
+  if (!isMicrosoftProvider(emailAccount.provider))
+    throw new Error(
+      "mark_read is only available for Outlook accounts. Gmail: use update_thread per thread.",
+    );
+
+  const emailProvider = await createEmailProvider({
+    emailAccountId: emailAccount.id,
+    provider: emailAccount.provider,
+    logger,
+  });
+  const folder = folderId
+    ? findFolder(
+        flattenOutlookFolders(await emailProvider.getFolders()),
+        folderId,
+      )
+    : undefined;
+
+  const { messages, pageToken } = await collectFolderMessages(emailProvider, {
+    folderId: folder?.id,
+    fromEmail,
+    readState: read ? "unread" : "read",
+  });
+
+  // markMessagesReadState throws on the first failure, so a failed chunk is
+  // retried one by one to count exactly what stayed unchanged.
+  let marked = 0;
+  for (const ids of chunk(
+    messages.map((message) => message.id),
+    MARK_READ_CHUNK_SIZE,
+  )) {
+    try {
+      await emailProvider.markMessagesReadState(ids, read);
+      marked += ids.length;
+    } catch (error) {
+      logger.warn("Marking a chunk failed; retrying one by one", { error });
+      for (const id of ids) {
+        try {
+          await emailProvider.markMessagesReadState([id], read);
+          marked++;
+        } catch {
+          // Counted as failed below.
+        }
+      }
+    }
+  }
+  logger.info("Marked mail via MCP", {
+    folderId: folder?.id,
+    read,
+    marked,
+    failed: messages.length - marked,
+  });
+
+  return {
+    emailAccount,
+    folderId: folder?.id,
+    path: folder?.path,
+    sender: fromEmail,
+    read,
+    marked,
+    failed: messages.length - marked,
     moreLeft: Boolean(pageToken),
   };
 }
@@ -915,18 +1036,23 @@ function findFolder(folders: OutlookFlatFolder[], nameOrId: string) {
   );
 }
 
-// Pages are collected before anything moves: Graph pages by offset, so moving
-// mail out of the folder mid-listing would skip a page for every page moved.
+// Pages are collected before anything changes: Graph pages by offset, so
+// moving mail out of the folder (or out of a read-state filter) mid-listing
+// would skip a page for every page changed.
 async function collectFolderMessages(
   emailProvider: EmailProvider,
-  folderId: string,
+  filter: {
+    folderId?: string;
+    fromEmail?: string;
+    readState?: "read" | "unread";
+  },
 ) {
   const messages: Array<{ id: string; threadId: string }> = [];
   let pageToken: string | undefined;
   do {
     const page = await emailProvider.searchMessages({
       query: "",
-      folderId,
+      ...filter,
       maxResults: SEARCH_INBOX_MAX_RESULTS,
       pageToken,
     });
