@@ -14,6 +14,7 @@ import {
   deleteFolderForMcp,
   labelThreadForMcp,
   listFoldersForMcp,
+  markReadForMcp,
   moveFolderToInboxForMcp,
   readThreadForMcp,
   runRulesForMcp,
@@ -463,19 +464,24 @@ describe("MCP email tools", () => {
         failedThreadIds: ["tb"],
       });
       const unarchiveMessages = vi.fn().mockResolvedValue(undefined);
+      const markMessagesReadState = vi.fn().mockResolvedValue(undefined);
+      const getFolders = vi.fn().mockResolvedValue(tree);
       vi.mocked(resolveMcpEmailAccount).mockResolvedValue(outlookAccount);
       vi.mocked(createEmailProvider).mockResolvedValue({
-        getFolders: vi.fn().mockResolvedValue(tree),
+        getFolders,
         deleteFolder,
         searchMessages,
         bulkArchiveThreads,
         unarchiveMessages,
+        markMessagesReadState,
       } as never);
       return {
+        getFolders,
         deleteFolder,
         searchMessages,
         bulkArchiveThreads,
         unarchiveMessages,
+        markMessagesReadState,
       };
     }
 
@@ -1354,6 +1360,255 @@ describe("MCP email tools", () => {
           moveFolderToInboxForMcp({
             userId: "user_1",
             folderId: "old",
+            logger,
+          }),
+        ).rejects.toThrow("Outlook");
+        expect(createEmailProvider).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("mark_read", () => {
+      it("marks every unread email in a folder across pages", async () => {
+        const { searchMessages, markMessagesReadState } = mockOutlook();
+
+        const result = await markReadForMcp({
+          userId: "user_1",
+          folderId: "Receipts",
+          logger,
+        });
+
+        expect(searchMessages).toHaveBeenCalledTimes(2);
+        expect(searchMessages).toHaveBeenCalledWith(
+          expect.objectContaining({
+            folderId: "receipts",
+            readState: "unread",
+          }),
+        );
+        expect(searchMessages).toHaveBeenLastCalledWith(
+          expect.objectContaining({ pageToken: "page-2" }),
+        );
+        expect(markMessagesReadState).toHaveBeenCalledWith(
+          ["r1", "r2", "r3"],
+          true,
+        );
+        expect(result).toMatchObject({
+          folderId: "receipts",
+          path: "Receipts",
+          read: true,
+          marked: 3,
+          failed: 0,
+          moreLeft: false,
+        });
+      });
+
+      it("collects every page before marking anything", async () => {
+        const { searchMessages, markMessagesReadState } = mockOutlook();
+
+        await markReadForMcp({
+          userId: "user_1",
+          folderId: "receipts",
+          logger,
+        });
+
+        const lastSearch = Math.max(...searchMessages.mock.invocationCallOrder);
+        expect(
+          markMessagesReadState.mock.invocationCallOrder[0],
+        ).toBeGreaterThan(lastSearch);
+      });
+
+      it("marks one sender's mail across the mailbox without listing folders", async () => {
+        const { getFolders, searchMessages, markMessagesReadState } =
+          mockOutlook();
+
+        const result = await markReadForMcp({
+          userId: "user_1",
+          sender: "Daily Deals <news@shop.example>",
+          logger,
+        });
+
+        expect(getFolders).not.toHaveBeenCalled();
+        expect(searchMessages).toHaveBeenCalledWith(
+          expect.objectContaining({
+            fromEmail: "news@shop.example",
+            folderId: undefined,
+            readState: "unread",
+          }),
+        );
+        expect(markMessagesReadState).toHaveBeenCalledWith(
+          ["r1", "r2", "r3"],
+          true,
+        );
+        expect(result).toMatchObject({
+          sender: "news@shop.example",
+          marked: 3,
+        });
+      });
+
+      it("marks read mail unread with read: false", async () => {
+        const { searchMessages, markMessagesReadState } = mockOutlook();
+
+        const result = await markReadForMcp({
+          userId: "user_1",
+          folderId: "receipts",
+          read: false,
+          logger,
+        });
+
+        expect(searchMessages).toHaveBeenCalledWith(
+          expect.objectContaining({ readState: "read" }),
+        );
+        expect(markMessagesReadState).toHaveBeenCalledWith(
+          ["r1", "r2", "r3"],
+          false,
+        );
+        expect(result).toMatchObject({ read: false, marked: 3 });
+      });
+
+      it("counts the emails it could not mark", async () => {
+        const { markMessagesReadState } = mockOutlook();
+        markMessagesReadState
+          .mockRejectedValueOnce(new Error("batch failed"))
+          .mockResolvedValueOnce(undefined)
+          .mockResolvedValueOnce(undefined)
+          .mockRejectedValueOnce(new Error("throttled"));
+
+        const result = await markReadForMcp({
+          userId: "user_1",
+          folderId: "receipts",
+          logger,
+        });
+
+        expect(markMessagesReadState).toHaveBeenCalledWith(["r3"], true);
+        expect(result).toMatchObject({ marked: 2, failed: 1 });
+      });
+
+      it("allows the Inbox", async () => {
+        const { searchMessages } = mockOutlook();
+
+        const result = await markReadForMcp({
+          userId: "user_1",
+          folderId: "Inbox",
+          logger,
+        });
+
+        expect(searchMessages).toHaveBeenCalledWith(
+          expect.objectContaining({ folderId: "inbox" }),
+        );
+        expect(result).toMatchObject({ path: "Inbox", marked: 3 });
+      });
+
+      it("never moves, trashes or deletes mail and records no held folder", async () => {
+        const { bulkArchiveThreads, unarchiveMessages, deleteFolder } =
+          mockOutlook();
+
+        await markReadForMcp({
+          userId: "user_1",
+          folderId: "receipts",
+          logger,
+        });
+
+        expect(bulkArchiveThreads).not.toHaveBeenCalled();
+        expect(unarchiveMessages).not.toHaveBeenCalled();
+        expect(deleteFolder).not.toHaveBeenCalled();
+        expect(redis.set).not.toHaveBeenCalled();
+      });
+
+      it("stops at 1,000 emails and says more are left", async () => {
+        const { searchMessages, markMessagesReadState } = mockOutlook();
+        let page = 0;
+        searchMessages.mockReset().mockImplementation(async () => {
+          page++;
+          return {
+            messages: Array.from({ length: 20 }, (_, i) =>
+              message({ id: `m${page}-${i}`, threadId: `t${page}-${i}` }),
+            ),
+            nextPageToken: `page-${page + 1}`,
+          };
+        });
+
+        const result = await markReadForMcp({
+          userId: "user_1",
+          folderId: "receipts",
+          logger,
+        });
+
+        expect(searchMessages).toHaveBeenCalledTimes(50);
+        expect(markMessagesReadState).toHaveBeenCalledTimes(50);
+        expect(result).toMatchObject({
+          marked: 1000,
+          failed: 0,
+          moreLeft: true,
+        });
+      });
+
+      it("marks nothing when nothing is unread", async () => {
+        const { searchMessages, markMessagesReadState } = mockOutlook();
+        searchMessages.mockReset().mockResolvedValue({ messages: [] });
+
+        const result = await markReadForMcp({
+          userId: "user_1",
+          folderId: "receipts",
+          logger,
+        });
+
+        expect(markMessagesReadState).not.toHaveBeenCalled();
+        expect(result).toMatchObject({ marked: 0, failed: 0, moreLeft: false });
+      });
+
+      it("refuses a call with neither a folder nor a sender", async () => {
+        mockOutlook();
+
+        await expect(
+          markReadForMcp({ userId: "user_1", logger }),
+        ).rejects.toThrow("folderId or sender");
+        expect(createEmailProvider).not.toHaveBeenCalled();
+      });
+
+      it("refuses a sender that is not an email address", async () => {
+        mockOutlook();
+
+        await expect(
+          markReadForMcp({ userId: "user_1", sender: "Daily Deals", logger }),
+        ).rejects.toThrow("not an email address");
+        expect(createEmailProvider).not.toHaveBeenCalled();
+      });
+
+      it("refuses more than one sender address", async () => {
+        mockOutlook();
+
+        await expect(
+          markReadForMcp({
+            userId: "user_1",
+            sender: "a@shop.example, b@shop.example",
+            logger,
+          }),
+        ).rejects.toThrow("one sender address");
+        expect(createEmailProvider).not.toHaveBeenCalled();
+      });
+
+      it("limits a sender to one folder when both are given", async () => {
+        const { searchMessages } = mockOutlook();
+
+        await markReadForMcp({
+          userId: "user_1",
+          folderId: "Receipts",
+          sender: "news@shop.example",
+          logger,
+        });
+
+        expect(searchMessages).toHaveBeenCalledWith(
+          expect.objectContaining({
+            folderId: "receipts",
+            fromEmail: "news@shop.example",
+          }),
+        );
+      });
+
+      it("refuses Gmail accounts before touching the mailbox", async () => {
+        await expect(
+          markReadForMcp({
+            userId: "user_1",
+            sender: "news@shop.example",
             logger,
           }),
         ).rejects.toThrow("Outlook");

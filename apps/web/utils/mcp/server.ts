@@ -33,6 +33,8 @@ import {
   labelThreadInputShape,
   listFoldersForMcp,
   listFoldersInputShape,
+  markReadForMcp,
+  markReadInputShape,
   moveFolderToInboxForMcp,
   moveFolderToInboxInputShape,
   mcpAccountSelectorShape,
@@ -96,7 +98,7 @@ export async function handleMcpServerRequest(
     { name: `${BRAND_NAME} MCP`, version: "1.0.0" },
     {
       instructions:
-        "Use list_email_accounts when targeting a specific inbox. Search and read tools return mail; create_draft saves a mailbox draft and never sends; update_thread archives or marks threads; label_thread adds or removes a label; list_folders, archive_folder, move_folder_to_inbox and delete_folder manage Outlook folders; run_rules runs the user's rules on one email. Rule and stats tools accept emailAccountId or emailAddress and default to the first linked account.",
+        "Use list_email_accounts when targeting a specific inbox. Search and read tools return mail; create_draft saves a mailbox draft and never sends; update_thread archives or marks threads; label_thread adds or removes a label; list_folders, archive_folder, move_folder_to_inbox and delete_folder manage Outlook folders; mark_read marks a whole Outlook folder or one sender's mail read; run_rules runs the user's rules on one email. Rule and stats tools accept emailAccountId or emailAddress and default to the first linked account.",
     },
   );
 
@@ -299,6 +301,27 @@ export async function handleMcpServerRequest(
       archiveFolderForMcp({
         userId,
         folderId: String(args.folderId),
+        ...accountSelector(args),
+        logger: toolLogger,
+      }),
+    ),
+  );
+
+  server.registerTool(
+    "mark_read",
+    {
+      title: "Mark read",
+      description:
+        "Mark every email in one Outlook folder (by name; Inbox allowed) or from one sender read in a single call; read: false marks them unread. Never moves or deletes mail. Use this instead of update_thread per thread when the user asks to mark a folder or a sender's mail read. Returns how many changed, how many failed and whether more are left (call again if moreLeft is true).",
+      inputSchema: markReadInputShape,
+      annotations: { ...mailboxWriteAnnotations, title: "Mark read" },
+    },
+    runTool("mark_read", "mcp:write", async (args) =>
+      markReadForMcp({
+        userId,
+        folderId: typeof args.folderId === "string" ? args.folderId : undefined,
+        sender: typeof args.sender === "string" ? args.sender : undefined,
+        read: args.read !== false,
         ...accountSelector(args),
         logger: toolLogger,
       }),
