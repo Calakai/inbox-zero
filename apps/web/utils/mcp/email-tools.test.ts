@@ -1008,7 +1008,7 @@ describe("MCP email tools", () => {
           expect(deleteFolder).toHaveBeenCalledWith("receipts");
         });
 
-        it("still moves the thread when its folders can't be read", async () => {
+        it("moves nothing when the thread's folders can't be read", async () => {
           vi.mocked(resolveMcpEmailAccount).mockResolvedValue(outlookAccount);
           const archiveThread = vi.fn().mockResolvedValue(undefined);
           vi.mocked(createEmailProvider).mockResolvedValue({
@@ -1016,18 +1016,35 @@ describe("MCP email tools", () => {
             archiveThread,
           } as never);
 
-          await updateThreadForMcp({
-            userId: "user_1",
-            threadId: "ta",
-            action: "archive",
-            logger,
-          });
+          await expect(
+            updateThreadForMcp({
+              userId: "user_1",
+              threadId: "ta",
+              action: "archive",
+              logger,
+            }),
+          ).rejects.toThrow("nothing was moved");
+          expect(archiveThread).not.toHaveBeenCalled();
+        });
 
-          expect(archiveThread).toHaveBeenCalledWith(
-            "ta",
-            outlookAccount.email,
-          );
-          expect(redis.set).not.toHaveBeenCalled();
+        it("moves nothing when the thread's folders can't be recorded", async () => {
+          vi.mocked(resolveMcpEmailAccount).mockResolvedValue(outlookAccount);
+          vi.mocked(redis.set).mockRejectedValue(new Error("redis down"));
+          const trashThread = vi.fn().mockResolvedValue(undefined);
+          vi.mocked(createEmailProvider).mockResolvedValue({
+            getThreadFolderIds: vi.fn().mockResolvedValue(["receipts"]),
+            trashThread,
+          } as never);
+
+          await expect(
+            updateThreadForMcp({
+              userId: "user_1",
+              threadId: "ta",
+              action: "trash",
+              logger,
+            }),
+          ).rejects.toThrow("nothing was moved");
+          expect(trashThread).not.toHaveBeenCalled();
         });
 
         it("does not read the thread's folders to mark it read, or for Gmail", async () => {

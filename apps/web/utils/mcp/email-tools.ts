@@ -356,24 +356,37 @@ export async function updateThreadForMcp({
   });
 
   // Archive, unarchive and trash move every message in the conversation, so
-  // they can empty a folder no tool showed the model. Record where the thread
-  // sits before moving it, or delete_folder would remove that folder unasked.
+  // they can empty a folder no tool showed the model. Recorded before anything
+  // moves, and a failed read or record stops the move: archive's fallback for a
+  // rejected thread read still moves mail, which would leave that folder
+  // deletable without the user's yes.
   if (
     isMicrosoftProvider(emailAccount.provider) &&
     action !== "mark_read" &&
     action !== "mark_unread"
   ) {
-    const folderIds = await emailProvider
-      .getThreadFolderIds(threadId)
-      .catch((error) => {
-        logger.warn("Could not read the folders a thread sits in", { error });
-        return [];
-      });
-    await markFoldersSeenHoldingMail({
-      emailAccountId: emailAccount.id,
-      folderIds,
-      logger,
-    });
+    let folderIds: string[];
+    try {
+      folderIds = await emailProvider.getThreadFolderIds(threadId);
+    } catch (error) {
+      logger.warn("Could not read the folders a thread sits in", { error });
+      throw new Error(
+        "Not moved: could not check which folders this thread is in for the delete check; nothing was moved.",
+      );
+    }
+    const recorded = await Promise.all(
+      folderIds.map((folderId) =>
+        markFolderHeldMail({
+          emailAccountId: emailAccount.id,
+          folderId,
+          logger,
+        }),
+      ),
+    );
+    if (recorded.includes(false))
+      throw new Error(
+        "Not moved: could not record this thread's folders for the delete check; nothing was moved.",
+      );
   }
 
   if (action === "archive")
