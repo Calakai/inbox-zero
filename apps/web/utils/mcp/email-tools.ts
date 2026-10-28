@@ -5,7 +5,9 @@ import { extractEmailAddress, extractEmailAddresses } from "@/utils/email";
 import { createEmailProvider } from "@/utils/email/provider";
 import { isMicrosoftProvider } from "@/utils/email/provider-types";
 import { getEmailForLLM } from "@/utils/get-email-from-message";
+import { emailToContent } from "@/utils/mail";
 import { resolveMcpEmailAccount } from "@/utils/mcp/account-selection";
+import { extractMailFacts } from "@/utils/mcp/mail-facts";
 import {
   flattenOutlookFolders,
   type OutlookFolder,
@@ -941,6 +943,11 @@ function toSearchResultMessage(message: ParsedMessage) {
     to: message.headers.to,
     date: message.date,
     snippet: message.snippet,
+    ...extractMailFacts({
+      subject: message.subject,
+      snippet: message.snippet,
+      body: emailToContent(message, { maxLength: READ_MESSAGE_MAX_LENGTH }),
+    }),
   };
 }
 
