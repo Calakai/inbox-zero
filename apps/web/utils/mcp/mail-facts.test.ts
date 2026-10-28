@@ -76,6 +76,34 @@ describe("extractMailFacts", () => {
   });
 
   it.each([
+    ["Order #8812 $27.00", "$27.00"],
+    ["Qty 2 $24.00", "$24.00"],
+    ["Item 3 $9.99 each", "$9.99"],
+    ["Call 1-800-555-0199 $5 fee", "$5"],
+  ])("keeps the price after a number in %s", (text, amount) => {
+    expect(extractMailFacts({ subject: text }).amounts).toEqual([amount]);
+  });
+
+  it.each([
+    ["-$20.00 refund", "-$20.00"],
+    ["\u2212$20.00 refund", "\u2212$20.00"],
+    ["Paid CA$20 today", "CA$20"],
+    ["Paid A$15 today", "A$15"],
+    ["Paid AU$15.50 today", "AU$15.50"],
+    ["Raised $5.5M in funding", "$5.5M"],
+    ["Earn up to $10k a year", "$10k"],
+  ])("keeps the sign, prefix and suffix in %s as written", (text, amount) => {
+    expect(extractMailFacts({ subject: text }).amounts).toEqual([amount]);
+  });
+
+  it.each([
+    ["due Mon 11/18", "Mon 11/18"],
+    ["due 2026-11-18T00:00", "2026-11-18"],
+  ])("reads the due date in %s with a weekday or time", (text, dueDate) => {
+    expect(extractMailFacts({ body: text }).dueDate).toBe(dueDate);
+  });
+
+  it.each([
     ["Payment due: Friday, Nov 7, 2026.", "Friday, Nov 7, 2026"],
     ["Your card will be charged on Dec 1st.", "Dec 1st"],
     ["Payment date 2026-11-20", "2026-11-20"],
