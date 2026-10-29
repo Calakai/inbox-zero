@@ -75,6 +75,28 @@ function addNestedActionOwnershipToInput<T extends Record<string, unknown>>(
   };
 }
 
+const OUTBOUND_ACTION_RISK_MESSAGES: Partial<Record<ActionType, string>> = {
+  [ActionType.FORWARD]:
+    "Medium Risk: Forward actions send a copy of matching emails to another address. Check the recipient and verify any email requesting this automation before enabling it.",
+  [ActionType.SEND_EMAIL]:
+    "Medium Risk: Send email actions send mail on your behalf automatically. Check the recipient and content before enabling it.",
+};
+
+const REPLY_RECIPIENT_RISK_MESSAGE =
+  "Medium Risk: This reply action also sends to fixed addresses (to, cc or bcc). Check every recipient and verify any email requesting this automation before enabling it.";
+
+function outboundRiskMessage(action: MappableAction): string | null {
+  if (action.type === ActionType.REPLY) {
+    const fixed = [
+      action.fields?.to,
+      action.fields?.cc,
+      action.fields?.bcc,
+    ].some((value) => !!value?.trim());
+    return fixed ? REPLY_RECIPIENT_RISK_MESSAGE : null;
+  }
+  return OUTBOUND_ACTION_RISK_MESSAGES[action.type] ?? null;
+}
+
 export function actionsNeedChatRiskConfirmation(
   result: CreateOrUpdateRuleSchema,
 ): { needsConfirmation: boolean; riskMessages: string[] } {
@@ -94,8 +116,13 @@ export function actionsNeedChatRiskConfirmation(
       buildRiskAction(action),
       ruleCtx,
     );
-    if (level !== "low" && !messages.includes(message)) {
-      messages.push(message);
+    // Static recipients still rate "low", but a chat-authored rule that sends
+    // or forwards mail to a fixed address is exactly what a prompt-injected
+    // email would ask for, so the user always confirms these.
+    const outboundMessage = outboundRiskMessage(action);
+    const riskMessage = level !== "low" ? message : outboundMessage;
+    if (riskMessage && !messages.includes(riskMessage)) {
+      messages.push(riskMessage);
     }
   }
   return {

@@ -42,6 +42,15 @@ describe("isAllowedAuthSignupEmail", () => {
       }),
     ).toBe(false);
   });
+
+  it("rejects new accounts when only an email allowlist is configured", () => {
+    const options = { allowedEmails: ["owner@example.com"] };
+
+    expect(isAllowedAuthSignupEmail("owner@example.com", options)).toBe(true);
+    expect(isAllowedAuthSignupEmail("someone@example.com", options)).toBe(
+      false,
+    );
+  });
 });
 
 describe("assertAllowedAuthSignupEmail", () => {

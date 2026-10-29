@@ -40,6 +40,7 @@ import { toastError, toastSuccess } from "@/components/Toast";
 import { Tooltip } from "@/components/Tooltip";
 import {
   confirmAssistantCreateRule,
+  confirmAssistantUpdateRule,
   confirmAssistantEmailAction,
   confirmAssistantSaveMemory,
 } from "@/utils/actions/assistant-chat";
@@ -1298,14 +1299,124 @@ export function UpdatedRuleActions({
   );
 }
 
+export function PendingUpdateRuleToolCard({
+  args,
+  output,
+  chatMessageId,
+  toolCallId,
+  disableConfirm,
+}: {
+  args: UpdateRuleTool["input"];
+  output: UpdateRuleOutput;
+  chatMessageId: string;
+  toolCallId: string;
+  disableConfirm: boolean;
+}) {
+  const { emailAccountId } = useAccount();
+  const { chatId } = useChat();
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+
+  const riskMessages = output.riskMessages?.filter(Boolean) ?? [];
+  const isProcessing = output.confirmationState === "processing";
+  const previewOutput: UpdateRuleOutput = {
+    success: true,
+    ruleId: output.ruleId,
+    originalName: output.originalName ?? args.ruleName,
+    updatedName: args.updates.name ?? output.originalName ?? args.ruleName,
+    updatedConditions: args.updates.condition,
+    updatedActions: args.updates.actions,
+  };
+
+  const handleConfirm = async () => {
+    setIsConfirming(true);
+    try {
+      if (!chatId) {
+        toastError({ description: "Could not update this rule." });
+        return;
+      }
+
+      const input = { chatId, chatMessageId, toolCallId };
+      const result = await confirmAssistantUpdateRule(emailAccountId, input);
+
+      if (result?.serverError) {
+        toastError({ description: result.serverError });
+        return;
+      }
+
+      if (!result?.data?.ruleId) {
+        toastError({ description: "Could not update this rule." });
+        return;
+      }
+
+      setConfirmed(true);
+      toastSuccess({ description: "Rule updated." });
+    } catch {
+      toastError({ description: "Could not update this rule." });
+    } finally {
+      setIsConfirming(false);
+    }
+  };
+
+  if (confirmed) return <UpdatedRule args={args} output={previewOutput} />;
+
+  return (
+    <div className="space-y-3">
+      <Alert variant="default" className="border-amber-500/40 bg-amber-500/5">
+        <AlertTriangleIcon className="size-4 text-amber-600" />
+        <AlertTitle>Review before saving</AlertTitle>
+        <AlertDescription className="space-y-2 text-sm">
+          <p>
+            This change lets the rule send email or data automatically. Review
+            it before saving.
+          </p>
+          {riskMessages.length === 1 ? (
+            <p className="text-muted-foreground">{riskMessages[0]}</p>
+          ) : riskMessages.length > 1 ? (
+            <ul className="list-disc space-y-1 pl-4 text-muted-foreground">
+              {riskMessages.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          ) : null}
+        </AlertDescription>
+      </Alert>
+
+      <UpdatedRule args={args} output={previewOutput} preview pending />
+
+      <div className="flex justify-end">
+        <Button
+          onClick={handleConfirm}
+          disabled={isConfirming || isProcessing || disableConfirm}
+          size="sm"
+          className="gap-2"
+        >
+          {isProcessing ? (
+            "Saving..."
+          ) : isConfirming ? (
+            <>
+              <Loader2 className="size-4 animate-spin" />
+              Saving...
+            </>
+          ) : (
+            "Save rule change"
+          )}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function UpdatedRule({
   args,
   output,
   preview,
+  pending,
 }: {
   args: UpdateRuleTool["input"];
   output: UpdateRuleOutput;
   preview?: boolean;
+  pending?: boolean;
 }) {
   const ruleId = output.ruleId;
   const title = output.updatedName || args.updates.name || args.ruleName;
@@ -1333,6 +1444,7 @@ export function UpdatedRule({
     !output.updatedConditions &&
     !output.updatedActions;
   const status = getRuleUpdateStatus({
+    pending,
     alreadyApplied: output.alreadyApplied,
     onlyEnabledChanged,
     updatedEnabled: output.updatedEnabled,
@@ -1839,14 +1951,17 @@ function RuleStatusBadge({ label, color }: { label: string; color: Color }) {
 }
 
 function getRuleUpdateStatus({
+  pending,
   alreadyApplied,
   onlyEnabledChanged,
   updatedEnabled,
 }: {
+  pending?: boolean;
   alreadyApplied: boolean | undefined;
   onlyEnabledChanged: boolean;
   updatedEnabled: boolean | undefined;
 }): { label: string; color: Color } {
+  if (pending) return { label: "Pending", color: "yellow" };
   if (alreadyApplied) return { label: "Already applied", color: "gray" };
 
   if (onlyEnabledChanged) {

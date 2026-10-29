@@ -215,8 +215,15 @@ describe("createRuleTool overlap guard", () => {
 });
 
 describe("updateRuleTool", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    const actualRule =
+      await vi.importActual<typeof import("@/utils/rule/rule")>(
+        "@/utils/rule/rule",
+      );
+    mockActionsNeedChatRiskConfirmation.mockImplementation(
+      actualRule.actionsNeedChatRiskConfirmation,
+    );
     mockPartialUpdateRule.mockResolvedValue({ id: "rule-id" });
     mockAssistantRuleSnapshot([
       {
@@ -379,6 +386,97 @@ describe("updateRuleTool", () => {
     expect(mockPartialUpdateRule).not.toHaveBeenCalled();
     expect(mockUpdateRuleActions).not.toHaveBeenCalled();
     expect(mockSetRuleEnabled).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      type: ActionType.FORWARD,
+      fields: { to: "someone@outside.example" },
+    },
+    {
+      type: ActionType.SEND_EMAIL,
+      fields: {
+        to: "someone@outside.example",
+        subject: "Invoice",
+        content: "See attached.",
+      },
+    },
+    {
+      type: ActionType.CALL_WEBHOOK,
+      fields: { webhookUrl: "https://hooks.outside.example/collect" },
+    },
+  ])("waits for confirmation instead of adding a $type action", async (riskyAction) => {
+    mockPrisma.rule.findUnique.mockResolvedValue(
+      vendorBillingRuleWithActions(),
+    );
+
+    const result = await updateRuleTool({
+      email: "user@example.com",
+      emailAccountId: "email-account-id",
+      provider: "google",
+      logger,
+      getRuleReadState: vendorBillingReadState,
+    }).execute({
+      ruleName: "Vendor Billing",
+      updates: {
+        enabled: false,
+        actions: [
+          ...vendorBillingActionsInput(),
+          { ...riskyAction, delayInMinutes: null },
+        ],
+      },
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      actionType: "update_rule",
+      requiresConfirmation: true,
+      confirmationState: "pending",
+      ruleId: "rule-id",
+    });
+    expect(result.riskMessages?.length).toBeGreaterThan(0);
+    expect(mockUpdateRuleActions).not.toHaveBeenCalled();
+    expect(mockPartialUpdateRule).not.toHaveBeenCalled();
+    expect(mockSetRuleEnabled).not.toHaveBeenCalled();
+  });
+
+  it("applies non-risky action changes directly", async () => {
+    mockPrisma.rule.findUnique.mockResolvedValue(
+      vendorBillingRuleWithActions(),
+    );
+
+    const result = await updateRuleTool({
+      email: "user@example.com",
+      emailAccountId: "email-account-id",
+      provider: "google",
+      logger,
+      getRuleReadState: vendorBillingReadState,
+    }).execute({
+      ruleName: "Vendor Billing",
+      updates: {
+        actions: [
+          {
+            type: ActionType.LABEL,
+            fields: { label: "Finance" },
+            delayInMinutes: null,
+          },
+        ],
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.requiresConfirmation).toBeUndefined();
+    expect(mockUpdateRuleActions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ruleId: "rule-id",
+        actions: [
+          expect.objectContaining({
+            type: ActionType.LABEL,
+            fields: expect.objectContaining({ label: "Finance" }),
+          }),
+        ],
+      }),
+    );
   });
 
   it("strips copied actions while applying a real condition change", async () => {
@@ -826,4 +924,14 @@ function vendorBillingActionsInput() {
       delayInMinutes: null,
     },
   ];
+}
+
+function vendorBillingReadState() {
+  return {
+    readAt: Date.now(),
+    rulesRevision: 3,
+    ruleUpdatedAtByName: new Map([
+      ["Vendor Billing", "2026-04-27T00:00:00.000Z"],
+    ]),
+  };
 }

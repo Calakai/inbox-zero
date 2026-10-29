@@ -142,4 +142,72 @@ describe("actionsNeedChatRiskConfirmation", () => {
     expect(result.needsConfirmation).toBe(false);
     expect(result.riskMessages).toEqual([]);
   });
+
+  it.each([
+    {
+      type: ActionType.FORWARD,
+      fields: { to: "someone@outside.example" },
+    },
+    {
+      type: ActionType.SEND_EMAIL,
+      fields: {
+        to: "someone@outside.example",
+        subject: "Hello",
+        content: "Fixed message",
+      },
+    },
+  ])("returns needsConfirmation true for $type actions with static recipients", ({
+    type,
+    fields,
+  }) => {
+    const result = actionsNeedChatRiskConfirmation({
+      name: "x",
+      condition: {
+        aiInstructions: null,
+        conditionalOperator: null,
+        static: { from: "@vendor.com", to: null, subject: null },
+      },
+      actions: [{ type, fields, delayInMinutes: null }],
+    });
+
+    expect(result.needsConfirmation).toBe(true);
+    expect(result.riskMessages).toHaveLength(1);
+  });
+  it("requires confirmation for a static reply that bcc's a fixed address", () => {
+    const result = actionsNeedChatRiskConfirmation({
+      name: "x",
+      condition: {
+        aiInstructions: null,
+        conditionalOperator: null,
+        static: { from: "@a.com", to: null, subject: null },
+      },
+      actions: [
+        {
+          type: ActionType.REPLY,
+          fields: { content: "Thanks, got it.", bcc: "outside@example.com" },
+          delayInMinutes: null,
+        },
+      ],
+    });
+    expect(result.needsConfirmation).toBe(true);
+  });
+
+  it("does not ask to confirm a static reply with no fixed recipients", () => {
+    const result = actionsNeedChatRiskConfirmation({
+      name: "x",
+      condition: {
+        aiInstructions: null,
+        conditionalOperator: null,
+        static: { from: "@a.com", to: null, subject: null },
+      },
+      actions: [
+        {
+          type: ActionType.REPLY,
+          fields: { content: "Thanks, got it." },
+          delayInMinutes: null,
+        },
+      ],
+    });
+    expect(result.needsConfirmation).toBe(false);
+  });
 });
