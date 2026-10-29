@@ -82,6 +82,21 @@ const OUTBOUND_ACTION_RISK_MESSAGES: Partial<Record<ActionType, string>> = {
     "Medium Risk: Send email actions send mail on your behalf automatically. Check the recipient and content before enabling it.",
 };
 
+const REPLY_RECIPIENT_RISK_MESSAGE =
+  "Medium Risk: This reply action also sends to fixed addresses (to, cc or bcc). Check every recipient and verify any email requesting this automation before enabling it.";
+
+function outboundRiskMessage(action: MappableAction): string | null {
+  if (action.type === ActionType.REPLY) {
+    const fixed = [
+      action.fields?.to,
+      action.fields?.cc,
+      action.fields?.bcc,
+    ].some((value) => !!value?.trim());
+    return fixed ? REPLY_RECIPIENT_RISK_MESSAGE : null;
+  }
+  return OUTBOUND_ACTION_RISK_MESSAGES[action.type] ?? null;
+}
+
 export function actionsNeedChatRiskConfirmation(
   result: CreateOrUpdateRuleSchema,
 ): { needsConfirmation: boolean; riskMessages: string[] } {
@@ -104,8 +119,8 @@ export function actionsNeedChatRiskConfirmation(
     // Static recipients still rate "low", but a chat-authored rule that sends
     // or forwards mail to a fixed address is exactly what a prompt-injected
     // email would ask for, so the user always confirms these.
-    const outboundMessage = OUTBOUND_ACTION_RISK_MESSAGES[action.type];
-    const riskMessage = level !== "low" ? message : (outboundMessage ?? null);
+    const outboundMessage = outboundRiskMessage(action);
+    const riskMessage = level !== "low" ? message : outboundMessage;
     if (riskMessage && !messages.includes(riskMessage)) {
       messages.push(riskMessage);
     }
