@@ -147,6 +147,24 @@ export type ConfirmAssistantCreateRuleBody = z.infer<
   typeof confirmAssistantCreateRuleBody
 >;
 
+export const pendingUpdateRuleToolOutputSchema = z.object({
+  success: z.literal(true),
+  actionType: z.literal("update_rule"),
+  requiresConfirmation: z.literal(true),
+  confirmationState: z.enum(["pending", "processing", "confirmed"]),
+  confirmationProcessingAt: z.string().optional(),
+  riskMessages: z.array(z.string()),
+  ruleId: z.string().trim().min(1).optional(),
+  confirmationResult: z
+    .object({
+      ruleId: z.string().trim().min(1),
+      confirmedAt: z.string().min(1),
+    })
+    .optional(),
+});
+
+export const confirmAssistantUpdateRuleBody = confirmAssistantActionBaseBody;
+
 export const pendingSaveMemoryToolOutputSchema = z.object({
   success: z.literal(true),
   actionType: z.literal("save_memory"),

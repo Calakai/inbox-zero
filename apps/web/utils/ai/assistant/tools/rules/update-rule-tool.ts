@@ -6,10 +6,12 @@ import prisma from "@/utils/prisma";
 import { filterNullProperties } from "@/utils";
 import {
   createRuleActionSchema,
+  type CreateOrUpdateRuleSchema,
   type RuleAction,
 } from "@/utils/ai/rule/create-rule-schema";
 import { isDuplicateError } from "@/utils/prisma-helpers";
 import {
+  actionsNeedChatRiskConfirmation,
   partialUpdateRule,
   setRuleEnabled,
   updateRuleActions,
@@ -115,40 +117,7 @@ export const updateRuleTool = ({
           });
         }
 
-        const rule = await prisma.rule.findUnique({
-          where: { name_emailAccountId: { name: ruleName, emailAccountId } },
-          select: {
-            id: true,
-            name: true,
-            enabled: true,
-            updatedAt: true,
-            organizationRuleId: true,
-            instructions: true,
-            from: true,
-            to: true,
-            subject: true,
-            conditionalOperator: true,
-            emailAccount: {
-              select: {
-                rulesRevision: true,
-              },
-            },
-            actions: {
-              select: {
-                type: true,
-                content: true,
-                label: true,
-                to: true,
-                cc: true,
-                bcc: true,
-                subject: true,
-                url: true,
-                folderName: true,
-                delayInMinutes: true,
-              },
-            },
-          },
-        });
+        const rule = await findRuleForChatUpdate({ ruleName, emailAccountId });
 
         if (!rule) {
           return buildHiddenRuleNotFoundError();
@@ -179,44 +148,12 @@ export const updateRuleTool = ({
           });
         }
 
-        const originalConditions = {
-          aiInstructions: rule.instructions,
-          static: filterNullProperties({
-            from: rule.from,
-            to: rule.to,
-            subject: rule.subject,
-          }),
-          conditionalOperator: rule.conditionalOperator,
-        };
-        const originalActions = rule.actions.map((action) => ({
-          type: action.type,
-          fields: filterNullProperties(
-            buildProviderRuleActionFields({
-              provider,
-              fields: {
-                label: action.label,
-                content: action.content,
-                to: action.to,
-                cc: action.cc,
-                bcc: action.bcc,
-                subject: action.subject,
-                webhookUrl: action.url,
-                folderName: action.folderName,
-              },
-            }),
-          ),
-          delayInMinutes: action.delayInMinutes,
-        }));
-        const requestedChangesAlreadyMatchRule = !ruleUpdateHasChanges({
-          updates,
-          rule,
+        const {
+          originalConditions,
           originalActions,
-        });
-        const effectiveUpdates = normalizeRuleUpdates({
-          updates,
-          rule,
-          originalActions,
-        });
+          effectiveUpdates,
+          requestedChangesAlreadyMatchRule,
+        } = planRuleUpdate({ rule, updates, provider });
         if (requestedChangesAlreadyMatchRule) {
           const snapshot = await loadRuleSnapshotAfterWrite({
             emailAccountId,
@@ -244,45 +181,32 @@ export const updateRuleTool = ({
           };
         }
 
-        if (effectiveUpdates.name || effectiveUpdates.condition) {
-          await partialUpdateRule({
+        const { needsConfirmation, riskMessages } = getRuleUpdateRisk({
+          rule,
+          effectiveUpdates,
+          originalActions,
+          provider,
+        });
+
+        if (needsConfirmation) {
+          return {
+            success: true,
+            actionType: "update_rule" as const,
+            requiresConfirmation: true as const,
+            confirmationState: "pending" as const,
+            riskMessages,
             ruleId: rule.id,
-            emailAccountId,
-            data: {
-              ...(effectiveUpdates.name && { name: effectiveUpdates.name }),
-              ...(effectiveUpdates.condition &&
-                buildConditionUpdateData(effectiveUpdates.condition)),
-            },
-          });
+            originalName: rule.name,
+          };
         }
 
-        if (effectiveUpdates.actions) {
-          await updateRuleActions({
-            ruleId: rule.id,
-            actions: effectiveUpdates.actions.map((action) => ({
-              type: action.type,
-              fields: buildProviderRuleActionFields({
-                provider,
-                fields: action.fields ?? {},
-              }),
-              delayInMinutes: action.delayInMinutes ?? null,
-            })),
-            provider,
-            emailAccountId,
-            logger,
-          });
-        }
-
-        if (
-          effectiveUpdates.enabled !== undefined &&
-          effectiveUpdates.enabled !== rule.enabled
-        ) {
-          await setRuleEnabled({
-            ruleId: rule.id,
-            emailAccountId,
-            enabled: effectiveUpdates.enabled,
-          });
-        }
+        await writeRuleUpdate({
+          rule,
+          effectiveUpdates,
+          emailAccountId,
+          provider,
+          logger,
+        });
 
         const snapshot = await loadRuleSnapshotAfterWrite({
           emailAccountId,
@@ -334,6 +258,10 @@ export type UpdateRuleTool = InferUITool<ReturnType<typeof updateRuleTool>>;
 
 export type UpdateRuleOutput = {
   success: boolean;
+  actionType?: "update_rule";
+  requiresConfirmation?: true;
+  confirmationState?: "pending" | "processing" | "confirmed";
+  riskMessages?: string[];
   alreadyApplied?: boolean;
   message?: string;
   ruleId?: string;
@@ -369,12 +297,224 @@ type PatchCondition = {
   conditionalOperator?: LogicalOperator | null;
 };
 
-type RuleUpdatePatch = {
+export type RuleUpdatePatch = {
   name?: string;
   enabled?: boolean;
   condition?: PatchCondition;
   actions?: RuleAction[];
 };
+
+type RuleForChatUpdate = NonNullable<
+  Awaited<ReturnType<typeof findRuleForChatUpdate>>
+>;
+
+export function findRuleForChatUpdate({
+  ruleName,
+  emailAccountId,
+}: {
+  ruleName: string;
+  emailAccountId: string;
+}) {
+  return prisma.rule.findUnique({
+    where: { name_emailAccountId: { name: ruleName, emailAccountId } },
+    select: {
+      id: true,
+      name: true,
+      enabled: true,
+      updatedAt: true,
+      organizationRuleId: true,
+      instructions: true,
+      from: true,
+      to: true,
+      subject: true,
+      conditionalOperator: true,
+      emailAccount: {
+        select: {
+          rulesRevision: true,
+        },
+      },
+      actions: {
+        select: {
+          type: true,
+          content: true,
+          label: true,
+          to: true,
+          cc: true,
+          bcc: true,
+          subject: true,
+          url: true,
+          folderName: true,
+          delayInMinutes: true,
+        },
+      },
+    },
+  });
+}
+
+export function planRuleUpdate({
+  rule,
+  updates,
+  provider,
+}: {
+  rule: RuleForChatUpdate;
+  updates: RuleUpdatePatch;
+  provider: string;
+}) {
+  const originalConditions = {
+    aiInstructions: rule.instructions,
+    static: filterNullProperties({
+      from: rule.from,
+      to: rule.to,
+      subject: rule.subject,
+    }),
+    conditionalOperator: rule.conditionalOperator,
+  };
+  const originalActions = rule.actions.map((action) => ({
+    type: action.type,
+    fields: filterNullProperties(
+      buildProviderRuleActionFields({
+        provider,
+        fields: {
+          label: action.label,
+          content: action.content,
+          to: action.to,
+          cc: action.cc,
+          bcc: action.bcc,
+          subject: action.subject,
+          webhookUrl: action.url,
+          folderName: action.folderName,
+        },
+      }),
+    ),
+    delayInMinutes: action.delayInMinutes,
+  }));
+  const requestedChangesAlreadyMatchRule = !ruleUpdateHasChanges({
+    updates,
+    rule,
+    originalActions,
+  });
+  const effectiveUpdates = normalizeRuleUpdates({
+    updates,
+    rule,
+    originalActions,
+  });
+
+  return {
+    originalConditions,
+    originalActions,
+    effectiveUpdates,
+    requestedChangesAlreadyMatchRule,
+  };
+}
+
+// A chat edit that changes actions or conditions can turn an existing rule
+// into one that sends mail or data out (e.g. a prompt-injected email asking
+// to add a forward), so check the resulting rule the same way createRule does.
+function getRuleUpdateRisk({
+  rule,
+  effectiveUpdates,
+  originalActions,
+  provider,
+}: {
+  rule: RuleForChatUpdate;
+  effectiveUpdates: RuleUpdatePatch;
+  originalActions: NonNullable<UpdateRuleOutput["originalActions"]>;
+  provider: string;
+}) {
+  if (!effectiveUpdates.actions && !effectiveUpdates.condition) {
+    return { needsConfirmation: false, riskMessages: [] };
+  }
+
+  const conditionData = effectiveUpdates.condition
+    ? buildConditionUpdateData(effectiveUpdates.condition)
+    : {};
+  const resulting = {
+    instructions: rule.instructions,
+    from: rule.from,
+    to: rule.to,
+    subject: rule.subject,
+    ...conditionData,
+  };
+  const actions = effectiveUpdates.actions ?? originalActions;
+
+  return actionsNeedChatRiskConfirmation({
+    name: effectiveUpdates.name ?? rule.name,
+    condition: {
+      aiInstructions: resulting.instructions,
+      static: {
+        from: resulting.from,
+        to: resulting.to,
+        subject: resulting.subject,
+      },
+      conditionalOperator:
+        conditionData.conditionalOperator ?? rule.conditionalOperator,
+      // The stored rule can legally hold any condition shape; the risk check
+      // only reads these fields, not the create-time union constraints.
+    } as CreateOrUpdateRuleSchema["condition"],
+    actions: actions.map((action) => ({
+      type: action.type as RuleAction["type"],
+      fields: buildProviderRuleActionFields({
+        provider,
+        fields: action.fields ?? {},
+      }),
+      delayInMinutes: action.delayInMinutes ?? null,
+    })),
+  });
+}
+
+export async function writeRuleUpdate({
+  rule,
+  effectiveUpdates,
+  emailAccountId,
+  provider,
+  logger,
+}: {
+  rule: RuleForChatUpdate;
+  effectiveUpdates: RuleUpdatePatch;
+  emailAccountId: string;
+  provider: string;
+  logger: Logger;
+}) {
+  if (effectiveUpdates.name || effectiveUpdates.condition) {
+    await partialUpdateRule({
+      ruleId: rule.id,
+      emailAccountId,
+      data: {
+        ...(effectiveUpdates.name && { name: effectiveUpdates.name }),
+        ...(effectiveUpdates.condition &&
+          buildConditionUpdateData(effectiveUpdates.condition)),
+      },
+    });
+  }
+
+  if (effectiveUpdates.actions) {
+    await updateRuleActions({
+      ruleId: rule.id,
+      actions: effectiveUpdates.actions.map((action) => ({
+        type: action.type,
+        fields: buildProviderRuleActionFields({
+          provider,
+          fields: action.fields ?? {},
+        }),
+        delayInMinutes: action.delayInMinutes ?? null,
+      })),
+      provider,
+      emailAccountId,
+      logger,
+    });
+  }
+
+  if (
+    effectiveUpdates.enabled !== undefined &&
+    effectiveUpdates.enabled !== rule.enabled
+  ) {
+    await setRuleEnabled({
+      ruleId: rule.id,
+      emailAccountId,
+      enabled: effectiveUpdates.enabled,
+    });
+  }
+}
 
 function ruleUpdateHasChanges({
   updates,

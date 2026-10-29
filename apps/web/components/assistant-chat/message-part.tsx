@@ -9,6 +9,7 @@ import {
   PendingDeleteRuleToolCard,
   PendingSaveMemoryToolCard,
   PendingCreateRuleToolCard,
+  PendingUpdateRuleToolCard,
   ForwardEmailResult,
   ManageInboxResult,
   ManageSenderCategoryResult,
@@ -319,6 +320,26 @@ export function MessagePart({
 
   if (part.type === "tool-updateRule") {
     if (part.state !== "output-available") return null;
+    const confirmationState = getOutputField<string>(
+      part.output,
+      "confirmationState",
+    );
+    if (
+      getOutputField<boolean>(part.output, "requiresConfirmation") === true &&
+      getOutputField<string>(part.output, "actionType") === "update_rule" &&
+      (confirmationState === "pending" || confirmationState === "processing")
+    ) {
+      return (
+        <PendingUpdateRuleToolCard
+          key={part.toolCallId}
+          args={part.input}
+          output={part.output}
+          chatMessageId={messageId}
+          toolCallId={part.toolCallId}
+          disableConfirm={disableConfirm || !isPersistedMessage}
+        />
+      );
+    }
     return (
       <UpdatedRule
         key={part.toolCallId}

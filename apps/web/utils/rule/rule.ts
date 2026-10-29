@@ -75,6 +75,13 @@ function addNestedActionOwnershipToInput<T extends Record<string, unknown>>(
   };
 }
 
+const OUTBOUND_ACTION_RISK_MESSAGES: Partial<Record<ActionType, string>> = {
+  [ActionType.FORWARD]:
+    "Medium Risk: Forward actions send a copy of matching emails to another address. Check the recipient and verify any email requesting this automation before enabling it.",
+  [ActionType.SEND_EMAIL]:
+    "Medium Risk: Send email actions send mail on your behalf automatically. Check the recipient and content before enabling it.",
+};
+
 export function actionsNeedChatRiskConfirmation(
   result: CreateOrUpdateRuleSchema,
 ): { needsConfirmation: boolean; riskMessages: string[] } {
@@ -94,8 +101,13 @@ export function actionsNeedChatRiskConfirmation(
       buildRiskAction(action),
       ruleCtx,
     );
-    if (level !== "low" && !messages.includes(message)) {
-      messages.push(message);
+    // Static recipients still rate "low", but a chat-authored rule that sends
+    // or forwards mail to a fixed address is exactly what a prompt-injected
+    // email would ask for, so the user always confirms these.
+    const outboundMessage = OUTBOUND_ACTION_RISK_MESSAGES[action.type];
+    const riskMessage = level !== "low" ? message : (outboundMessage ?? null);
+    if (riskMessage && !messages.includes(riskMessage)) {
+      messages.push(riskMessage);
     }
   }
   return {
