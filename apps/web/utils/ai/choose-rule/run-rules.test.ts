@@ -31,6 +31,7 @@ import {
 import { findMatchingRules } from "@/utils/ai/choose-rule/match-rules";
 import { getActionItemsWithAiArgs } from "@/utils/ai/choose-rule/choose-args";
 import { executeAct } from "@/utils/ai/choose-rule/execute";
+import { scheduleDelayedActions } from "@/utils/scheduled-actions/scheduler";
 import { determineConversationStatus } from "@/utils/reply-tracker/handle-conversation-status";
 import { isDraftReplyActionType } from "@/utils/actions/draft-reply";
 
@@ -873,6 +874,54 @@ describe("runRules outbound guardrails", () => {
     expect(result[0]?.reason).toContain(
       "email- or domain-based From condition",
     );
+  });
+});
+
+describe("runRules approval-required actions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function runWithActions(actions: Action[]) {
+    const rule = createRule("approval-rule", null, actions);
+    mockMatchingRules([
+      { rule, matchReasons: [{ type: ConditionType.STATIC }] },
+    ]);
+    vi.mocked(getActionItemsWithAiArgs).mockResolvedValue(actions as any);
+    vi.mocked(executeAct).mockResolvedValue(ExecutedRuleStatus.PENDING);
+    const createSpy = mockExecutedRuleCreate({ rule, actionItems: actions });
+
+    await runRulesWithDefaults({ rules: [rule] });
+    return createSpy;
+  }
+
+  it("stores a delayed DELETE as a held action instead of scheduling it", async () => {
+    const createSpy = await runWithActions([
+      getAction({
+        id: "delete-1",
+        type: ActionType.DELETE,
+        delayInMinutes: 60,
+      }),
+    ]);
+
+    expect(scheduleDelayedActions).not.toHaveBeenCalled();
+    expect(
+      getCreatedActionItems(createSpy)?.map((item: any) => item.type),
+    ).toEqual([ActionType.DELETE]);
+    expect(executeAct).toHaveBeenCalledTimes(1);
+  });
+
+  it("still schedules a delayed action that needs no approval", async () => {
+    const createSpy = await runWithActions([
+      getAction({
+        id: "archive-1",
+        type: ActionType.ARCHIVE,
+        delayInMinutes: 60,
+      }),
+    ]);
+
+    expect(scheduleDelayedActions).toHaveBeenCalledTimes(1);
+    expect(getCreatedActionItems(createSpy)).toEqual([]);
   });
 });
 

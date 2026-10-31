@@ -61,7 +61,7 @@ async function getExecutedRules({
     );
   } else {
     conditions.push(
-      Prisma.sql`status = ${ExecutedRuleStatus.APPLIED}::"ExecutedRuleStatus" AND "ruleId" IS NOT NULL`,
+      Prisma.sql`status IN (${ExecutedRuleStatus.APPLIED}::"ExecutedRuleStatus", ${ExecutedRuleStatus.PENDING}::"ExecutedRuleStatus") AND "ruleId" IS NOT NULL`,
     );
     if (ruleId && ruleId !== "all") {
       conditions.push(Prisma.sql`"ruleId" = ${ruleId}`);

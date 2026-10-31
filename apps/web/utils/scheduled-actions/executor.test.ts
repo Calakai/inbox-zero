@@ -128,7 +128,7 @@ describe("executor", () => {
 
     it("records skipped delayed actions without failing the scheduled action", async () => {
       mockScheduledActionUpdate(ScheduledActionStatus.COMPLETED);
-      mockExecutedActionCreate({ type: ActionType.FORWARD });
+      mockExecutedActionCreate({ type: ActionType.REPLY });
       mockExecutedRuleFind();
       mockCompletionCounts({ pendingActions: 0, failedActions: 0 });
       mockExecutedRuleUpdate(ExecutedRuleStatus.APPLIED);
@@ -138,7 +138,7 @@ describe("executor", () => {
       });
 
       const result = await executeScheduledAction(
-        { ...mockScheduledAction, actionType: ActionType.FORWARD },
+        { ...mockScheduledAction, actionType: ActionType.REPLY },
         await getMockEmailProvider(),
         logger,
       );
@@ -286,6 +286,29 @@ describe("executor", () => {
         },
       });
       expectExecutedRuleStatus(ExecutedRuleStatus.APPLIED);
+    });
+
+    it.each([
+      ActionType.DELETE,
+      ActionType.FORWARD,
+    ])("never runs a queued %s action on a schedule", async (actionType) => {
+      mockScheduledActionUpdate(ScheduledActionStatus.FAILED);
+      mockExecutedRuleFind();
+      mockCompletionCounts({ pendingActions: 0, failedActions: 1 });
+      mockExecutedRuleUpdate(
+        ExecutedRuleStatus.ERROR,
+        failedScheduledActionReason,
+      );
+
+      const result = await executeScheduledAction(
+        { ...mockScheduledAction, actionType },
+        await getMockEmailProvider(),
+        logger,
+      );
+
+      expect(result.success).toBe(false);
+      expect(runActionFunction).not.toHaveBeenCalled();
+      expect(prisma.executedAction.create).not.toHaveBeenCalled();
     });
 
     it("should handle execution errors and mark as failed", async () => {

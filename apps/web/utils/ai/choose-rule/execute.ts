@@ -22,6 +22,7 @@ import {
   persistExecutedActionOutcome,
 } from "@/utils/ai/executed-action-outcome";
 import { isSendingActionType } from "@/utils/ai/sending-action";
+import { requiresApproval } from "@/utils/ai/choose-rule/approval-required";
 
 const MODULE = "ai-execute-act";
 
@@ -41,12 +42,15 @@ export async function executeAct({
   emailAccount,
   message,
   logger,
+  approved = false,
 }: {
   client: EmailProvider;
   executedRule: ExecutedRuleWithActionItems;
   message: ParsedMessage;
   emailAccount: ActionExecutionEmailAccount;
   logger: Logger;
+  // Set only when the user approved the held actions. Then only those actions run.
+  approved?: boolean;
 }): Promise<ExecutedRuleStatus> {
   const log = logger.with({
     module: MODULE,
@@ -57,8 +61,17 @@ export async function executeAct({
   });
 
   const actionFailures: ActionFailure[] = [];
+  let heldForApproval = false;
 
   for (const action of executedRule.actionItems) {
+    if (approved) {
+      if (!requiresApproval(action.type) || action.executionStatus) continue;
+    } else if (requiresApproval(action.type)) {
+      heldForApproval = true;
+      log.info("Holding action for approval", { actionId: action.id });
+      continue;
+    }
+
     try {
       if (
         shouldSkipAutomatedArchiveForSender({
@@ -191,6 +204,15 @@ export async function executeAct({
       })),
     });
     return ExecutedRuleStatus.ERROR;
+  }
+
+  if (heldForApproval) {
+    await updateExecutedRuleOrThrow({
+      log,
+      executedRuleId: executedRule.id,
+      data: { status: ExecutedRuleStatus.PENDING },
+    });
+    return ExecutedRuleStatus.PENDING;
   }
 
   await updateExecutedRuleOrThrow({

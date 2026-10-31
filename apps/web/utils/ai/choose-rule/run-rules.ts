@@ -1,3 +1,4 @@
+import { requiresApproval } from "@/utils/ai/choose-rule/approval-required";
 import { after } from "next/server";
 import type { ParsedMessage, RuleWithActions } from "@/utils/types";
 import {
@@ -443,8 +444,12 @@ async function executeMatchedRule(
     };
   }
 
+  // A delay must not turn into a way around approval: held actions are stored with
+  // the immediate ones, where executeAct leaves them waiting.
   const { immediateActions, delayedActions } = groupBy(actionItems, (item) =>
-    item.delayInMinutes != null && item.delayInMinutes > 0
+    item.delayInMinutes != null &&
+    item.delayInMinutes > 0 &&
+    !requiresApproval(item.type)
       ? "delayedActions"
       : "immediateActions",
   );
