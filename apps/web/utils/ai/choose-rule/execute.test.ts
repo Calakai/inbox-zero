@@ -98,6 +98,7 @@ describe("executeAct", () => {
       message,
       emailAccount,
       logger,
+      approved: true,
     });
 
     expect(mockExecutedActionUpdate).toHaveBeenCalledWith({

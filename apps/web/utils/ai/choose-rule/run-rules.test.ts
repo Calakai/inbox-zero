@@ -895,19 +895,22 @@ describe("runRules approval-required actions", () => {
     return createSpy;
   }
 
-  it("stores a delayed DELETE as a held action instead of scheduling it", async () => {
+  it.each([
+    ActionType.DELETE,
+    ActionType.FORWARD,
+    ActionType.SEND_EMAIL,
+    ActionType.REPLY,
+    ActionType.CALL_WEBHOOK,
+    ActionType.INTEGRATION,
+  ])("stores a delayed %s as a held action instead of scheduling it", async (type) => {
     const createSpy = await runWithActions([
-      getAction({
-        id: "delete-1",
-        type: ActionType.DELETE,
-        delayInMinutes: 60,
-      }),
+      getAction({ id: "guarded-1", type, delayInMinutes: 60 }),
     ]);
 
     expect(scheduleDelayedActions).not.toHaveBeenCalled();
     expect(
       getCreatedActionItems(createSpy)?.map((item: any) => item.type),
-    ).toEqual([ActionType.DELETE]);
+    ).toEqual([type]);
     expect(executeAct).toHaveBeenCalledTimes(1);
   });
 
