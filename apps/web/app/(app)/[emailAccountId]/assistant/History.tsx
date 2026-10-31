@@ -17,6 +17,15 @@ import { RulesSelect } from "@/app/(app)/[emailAccountId]/assistant/RulesSelect"
 import { useAccount } from "@/providers/EmailAccountProvider";
 import { useChat } from "@/providers/ChatProvider";
 import { useExecutedRules } from "@/hooks/useExecutedRules";
+import { useAction } from "next-safe-action/hooks";
+import { mutate } from "swr";
+import { toastError, toastSuccess } from "@/components/Toast";
+import { ExecutedRuleStatus } from "@/generated/prisma/enums";
+import {
+  approveExecutedRuleAction,
+  rejectExecutedRuleAction,
+} from "@/utils/actions/executed-rule";
+import { getActionErrorMessage } from "@/utils/error";
 import { useMessagesBatch } from "@/hooks/useMessagesBatch";
 import type { ParsedMessage } from "@/utils/types";
 import { EmailMessageCell } from "@/components/EmailMessageCell";
@@ -362,6 +371,17 @@ function RuleCell({
     <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap sm:justify-end">
       <div className="min-w-0">
         <ResultsDisplay results={executedRules} />
+        {executedRules
+          .filter(
+            (executedRule) =>
+              executedRule.status === ExecutedRuleStatus.PENDING,
+          )
+          .map((executedRule) => (
+            <ApprovalRow
+              key={executedRule.id}
+              executedRuleId={executedRule.id}
+            />
+          ))}
       </div>
       {message ? (
         <FixWithChat
@@ -376,6 +396,63 @@ function RuleCell({
           Fix
         </Button>
       )}
+    </div>
+  );
+}
+
+function ApprovalRow({ executedRuleId }: { executedRuleId: string }) {
+  const { emailAccountId } = useAccount();
+  const refresh = () =>
+    mutate(
+      (key) =>
+        typeof key === "string" &&
+        key.startsWith("/api/user/executed-rules/history"),
+    );
+  const onError = ({
+    error,
+  }: {
+    error: Parameters<typeof getActionErrorMessage>[0];
+  }) => toastError({ description: getActionErrorMessage(error) });
+
+  const approve = useAction(
+    approveExecutedRuleAction.bind(null, emailAccountId),
+    {
+      onSuccess: () => {
+        toastSuccess({ description: "Approved and done" });
+        refresh();
+      },
+      onError,
+    },
+  );
+  const reject = useAction(
+    rejectExecutedRuleAction.bind(null, emailAccountId),
+    {
+      onSuccess: refresh,
+      onError,
+    },
+  );
+  const busy = approve.isExecuting || reject.isExecuting;
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <Badge color="yellow">Needs your approval</Badge>
+      <Button
+        size="sm"
+        loading={approve.isExecuting}
+        disabled={busy}
+        onClick={() => approve.execute({ executedRuleId })}
+      >
+        Approve
+      </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        loading={reject.isExecuting}
+        disabled={busy}
+        onClick={() => reject.execute({ executedRuleId })}
+      >
+        Reject
+      </Button>
     </div>
   );
 }

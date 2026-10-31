@@ -98,6 +98,7 @@ describe("executeAct", () => {
       message,
       emailAccount,
       logger,
+      approved: true,
     });
 
     expect(mockExecutedActionUpdate).toHaveBeenCalledWith({
@@ -190,6 +191,7 @@ describe("executeAct", () => {
       message,
       emailAccount,
       logger,
+      approved: true,
     });
 
     expect(result).toBe(ExecutedRuleStatus.APPLIED);
@@ -428,6 +430,96 @@ describe("executeAct", () => {
         },
         sentMessageIds: ["sent-message-before-failure"],
       },
+    });
+  });
+  describe("approval-required actions", () => {
+    function ruleWith(
+      actions: { id: string; type: ActionType; executionStatus?: string }[],
+    ) {
+      return { ...baseExecutedRule, actionItems: actions } as any;
+    }
+
+    it.each([
+      ActionType.DELETE,
+      ActionType.FORWARD,
+    ])("holds %s on an automated rule instead of running it", async (type) => {
+      const status = await executeAct({
+        client: mockClient,
+        executedRule: ruleWith([{ id: "action-1", type }]),
+        message,
+        emailAccount,
+        logger,
+      });
+
+      expect(status).toBe(ExecutedRuleStatus.PENDING);
+      expect(mockRunActionFunction).not.toHaveBeenCalled();
+      expect(mockExecutedActionUpdate).not.toHaveBeenCalled();
+      expect(mockExecutedRuleUpdate).toHaveBeenCalledWith({
+        where: { id: "executed-rule-1" },
+        data: { status: ExecutedRuleStatus.PENDING },
+      });
+    });
+
+    it("still runs the other actions of the same rule", async () => {
+      mockRunActionFunction.mockResolvedValue({ success: true });
+
+      const status = await executeAct({
+        client: mockClient,
+        executedRule: ruleWith([
+          { id: "archive-1", type: ActionType.ARCHIVE },
+          { id: "delete-1", type: ActionType.DELETE },
+          { id: "label-1", type: ActionType.LABEL },
+        ]),
+        message,
+        emailAccount,
+        logger,
+      });
+
+      expect(status).toBe(ExecutedRuleStatus.PENDING);
+      expect(
+        mockRunActionFunction.mock.calls.map(([args]) => args.action.type),
+      ).toEqual([ActionType.ARCHIVE, ActionType.LABEL]);
+    });
+
+    it("applies a rule with no guarded actions as before", async () => {
+      mockRunActionFunction.mockResolvedValue({ success: true });
+
+      const status = await executeAct({
+        client: mockClient,
+        executedRule: ruleWith([{ id: "archive-1", type: ActionType.ARCHIVE }]),
+        message,
+        emailAccount,
+        logger,
+      });
+
+      expect(status).toBe(ExecutedRuleStatus.APPLIED);
+      expect(mockRunActionFunction).toHaveBeenCalledTimes(1);
+    });
+
+    it("runs only the held actions once approved", async () => {
+      mockRunActionFunction.mockResolvedValue({ success: true });
+
+      const status = await executeAct({
+        client: mockClient,
+        executedRule: ruleWith([
+          {
+            id: "archive-1",
+            type: ActionType.ARCHIVE,
+            executionStatus: "SUCCEEDED",
+          },
+          { id: "delete-1", type: ActionType.DELETE },
+        ]),
+        message,
+        emailAccount,
+        logger,
+        approved: true,
+      });
+
+      expect(status).toBe(ExecutedRuleStatus.APPLIED);
+      expect(mockRunActionFunction).toHaveBeenCalledTimes(1);
+      expect(mockRunActionFunction.mock.calls[0][0].action.type).toBe(
+        ActionType.DELETE,
+      );
     });
   });
 });

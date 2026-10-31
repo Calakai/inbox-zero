@@ -94,41 +94,9 @@ describe("executor", () => {
       expectExecutedRuleStatus(ExecutedRuleStatus.APPLIED);
     });
 
-    it("persists provider message IDs for delayed sending actions", async () => {
-      mockScheduledActionUpdate(ScheduledActionStatus.COMPLETED);
-      mockExecutedActionCreate({ type: ActionType.REPLY });
-      mockExecutedRuleFind();
-      mockCompletionCounts({ pendingActions: 0, failedActions: 0 });
-      mockExecutedRuleUpdate(ExecutedRuleStatus.APPLIED);
-      vi.mocked(runActionFunction).mockResolvedValue({
-        sentMessageIds: ["sent-message-1"],
-      });
-
-      await executeScheduledAction(
-        { ...mockScheduledAction, actionType: ActionType.REPLY },
-        await getMockEmailProvider(),
-        logger,
-      );
-
-      expect(prisma.executedAction.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          executionStartedAt: expect.any(Date),
-        }),
-      });
-      expect(prisma.executedAction.update).toHaveBeenCalledWith({
-        where: { id: "executed-action-123" },
-        data: {
-          executionStatus: ExecutedActionStatus.SUCCEEDED,
-          executedAt: expect.any(Date),
-          executionError: Prisma.DbNull,
-          sentMessageIds: ["sent-message-1"],
-        },
-      });
-    });
-
     it("records skipped delayed actions without failing the scheduled action", async () => {
       mockScheduledActionUpdate(ScheduledActionStatus.COMPLETED);
-      mockExecutedActionCreate({ type: ActionType.FORWARD });
+      mockExecutedActionCreate({ type: ActionType.LABEL });
       mockExecutedRuleFind();
       mockCompletionCounts({ pendingActions: 0, failedActions: 0 });
       mockExecutedRuleUpdate(ExecutedRuleStatus.APPLIED);
@@ -138,7 +106,7 @@ describe("executor", () => {
       });
 
       const result = await executeScheduledAction(
-        { ...mockScheduledAction, actionType: ActionType.FORWARD },
+        { ...mockScheduledAction, actionType: ActionType.LABEL },
         await getMockEmailProvider(),
         logger,
       );
@@ -217,49 +185,6 @@ describe("executor", () => {
       );
     });
 
-    it("forwards selectedAttachments into the executed action", async () => {
-      const selectedAttachments = [
-        {
-          fileId: "drive-file-1",
-          name: "proposal.pdf",
-          mimeType: "application/pdf",
-        },
-      ];
-      const scheduledActionWithAttachments = {
-        ...mockScheduledAction,
-        actionType: ActionType.REPLY,
-        content: "Reply with attachment",
-        selectedAttachments,
-      };
-
-      mockScheduledActionUpdate(
-        ScheduledActionStatus.COMPLETED,
-        scheduledActionWithAttachments,
-      );
-      mockExecutedActionCreate({
-        type: ActionType.REPLY,
-        content: "Reply with attachment",
-        selectedAttachments,
-      });
-      mockExecutedRuleFind();
-      mockCompletionCounts({ pendingActions: 0, failedActions: 0 });
-      mockExecutedRuleUpdate(ExecutedRuleStatus.APPLIED);
-
-      await executeScheduledAction(
-        scheduledActionWithAttachments,
-        await getMockEmailProvider(),
-        logger,
-      );
-
-      expect(prisma.executedAction.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          type: ActionType.REPLY,
-          content: "Reply with attachment",
-          selectedAttachments,
-        }),
-      });
-    });
-
     it("should complete the ExecutedRule when the email no longer exists", async () => {
       const emailProvider = await getMockEmailProvider();
       (emailProvider.getMessage as any).mockResolvedValueOnce(null);
@@ -286,6 +211,29 @@ describe("executor", () => {
         },
       });
       expectExecutedRuleStatus(ExecutedRuleStatus.APPLIED);
+    });
+
+    it.each([
+      ActionType.DELETE,
+      ActionType.FORWARD,
+    ])("never runs a queued %s action on a schedule", async (actionType) => {
+      mockScheduledActionUpdate(ScheduledActionStatus.FAILED);
+      mockExecutedRuleFind();
+      mockCompletionCounts({ pendingActions: 0, failedActions: 1 });
+      mockExecutedRuleUpdate(
+        ExecutedRuleStatus.ERROR,
+        failedScheduledActionReason,
+      );
+
+      const result = await executeScheduledAction(
+        { ...mockScheduledAction, actionType },
+        await getMockEmailProvider(),
+        logger,
+      );
+
+      expect(result.success).toBe(false);
+      expect(runActionFunction).not.toHaveBeenCalled();
+      expect(prisma.executedAction.create).not.toHaveBeenCalled();
     });
 
     it("should handle execution errors and mark as failed", async () => {

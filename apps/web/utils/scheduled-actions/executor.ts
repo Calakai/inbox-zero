@@ -8,6 +8,7 @@ import prisma from "@/utils/prisma";
 import type { Logger } from "@/utils/logger";
 import { getEmailAccountWithAiAndTokens } from "@/utils/user/get";
 import { runActionFunction } from "@/utils/ai/actions";
+import { requiresApproval } from "@/utils/ai/choose-rule/approval-required";
 import type {
   ActionExecutionEmailAccount,
   ActionItem,
@@ -179,6 +180,12 @@ async function executeDelayedAction({
   scheduledAction: ScheduledAction;
   log: Logger;
 }) {
+  if (requiresApproval(actionItem.type)) {
+    throw new Error(
+      `${actionItem.type} needs the user's approval and cannot run on a schedule`,
+    );
+  }
+
   const executedAction = await prisma.executedAction.create({
     data: {
       type: actionItem.type,
