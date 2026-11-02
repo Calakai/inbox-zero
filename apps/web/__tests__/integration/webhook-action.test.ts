@@ -225,6 +225,8 @@ describe.skipIf(!RUN_INTEGRATION_TESTS)(
           userId: "test-user-id",
         },
         logger: createTestLogger(),
+        // #43 holds webhook and integration actions until the user approves
+        approved: true,
       });
 
       // Verify webhook was called
@@ -335,19 +337,26 @@ describe.skipIf(!RUN_INTEGRATION_TESTS)(
         rawRecipients: [],
       };
 
-      await executeAct({
-        client: harness.provider,
-        executedRule,
-        message,
-        emailAccount: {
-          email: TEST_EMAIL,
-          id: "test-account-id",
-          userId: "test-user-id",
-        },
-        logger: createTestLogger(),
-      });
+      const run = (approved: boolean) =>
+        executeAct({
+          client: harness.provider,
+          executedRule,
+          message,
+          emailAccount: {
+            email: TEST_EMAIL,
+            id: "test-account-id",
+            userId: "test-user-id",
+          },
+          logger: createTestLogger(),
+          approved,
+        });
 
-      // Webhook was called
+      // #43: the first pass applies the label and holds the webhook for approval
+      await run(false);
+      expect(receivedRequests).toHaveLength(0);
+
+      // After approval only the held webhook runs
+      await run(true);
       expect(receivedRequests).toHaveLength(1);
 
       // Label was created and applied in Gmail
