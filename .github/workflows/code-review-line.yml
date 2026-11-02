@@ -1,0 +1,130 @@
+# code-review-line: fails a pull request whose body has no valid "Code review:" line for its current head.
+#
+# Solves: green CI doesn't read the logic (lifeos#96 merged on green and shipped a feedback loop). The local Flow
+# gate (hooks/flow-gate.sh) refuses `gh pr merge` without the line; this makes GitHub refuse every other path
+# (website button, auto-merge, `gh api`) once branch protection requires the `code-review-line` status check.
+#
+# Passes when the body (HTML comments stripped) has one of:
+#   Code review: <reviewer> @ <head sha>, <findings or no findings>
+#       a reviewer that reads code (something with code-review in its name, aegis-swift-reviewer or
+#       fullstack-slice-reviewer), the PR's CURRENT head sha (7 to 40 hex, a prefix of the head), and the word findings
+#   Code review: n.a., docs only
+#       and every changed file (a renamed file's old path too) is .md, .mdx, .markdown, .rst or an image
+# The parsing is the gate's, line for line (REVIEW_LINE, REVIEWER, REVIEWED_AT, FINDINGS, DOCS_ONLY, DOC_FILE in
+# hooks/flow-gate.sh); tests/code-review-line proves the two stay equal. Edit both together.
+#
+# No secrets, no model calls, no checkout: it reads the PR (body, head sha, file list) fresh from the API with the
+# workflow's own token, so a re-run after a body edit sees the edit. Re-runs on edit and on every new commit.
+# Copied into each repo's .github/workflows/ (scripts/join-project.sh does it for new repos).
+#
+# Known limit: a pull_request run uses the workflow file as the PR has it, so a PR that edits this file (or adds a
+# job also named code-review-line) can turn its own check green. The local gate doesn't see it either. It stops
+# mistakes and forgotten reviews, not a PR written to defeat it; closing that needs CODEOWNERS plus a required
+# review on this file, or an org-level required workflow.
+name: code-review-line
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: code-review-line-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  code-review-line:
+    name: code-review-line
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check the Code review line
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess, sys
+
+          COMMENT = re.compile(r"<!--[\s\S]*?-->")
+          REVIEW_LINE = re.compile(r"^[ \t>*_-]*Code review:[*_]*[ \t]*(.*?)[ \t]*$", re.I | re.M)
+          REVIEWER = re.compile(r"code-review|aegis-swift-reviewer|fullstack-slice-reviewer", re.I)
+          REVIEWED_AT = re.compile(r"@[ \t]*`?([0-9a-fA-F]{7,40})(?![0-9a-fA-F])")
+          FINDINGS = re.compile(r"finding", re.I)
+          DOCS_ONLY = re.compile(r"n\.?a\.?[ \t]*[,;:\u2013\u2014-]?[ \t]*docs[ \t-]only\b", re.I)
+          DOC_FILE = re.compile(r"\.(md|mdx|markdown|rst|png|jpe?g|gif|webp)$", re.I)  # not .txt: requirements.txt is code
+
+
+          def check(body, head, files):
+              """(ok, message). files is [(path, previous path or None)], or None when the list couldn't be read."""
+              lines = REVIEW_LINE.findall(COMMENT.sub("", body or ""))
+              short = head[:7]
+              want = 'Code review: <reviewer> @ %s, <findings or no findings>' % short
+
+              def reviewed(line):
+                  m = REVIEWED_AT.search(line)
+                  return bool(REVIEWER.search(line) and m and head.startswith(m.group(1).lower())
+                              and FINDINGS.search(line[m.end():]))
+
+              if any(reviewed(line) for line in lines):
+                  return True, "Code review line found for head %s." % short
+              if any(DOCS_ONLY.match(line) for line in lines):
+                  if files is None:
+                      return False, "The body says docs only but the changed files couldn't be read."
+                  paths = [p for pair in files for p in pair if p]
+                  code = [p for p in paths if not DOC_FILE.search(p)]
+                  if code:
+                      return False, ('The body says "Code review: n.a., docs only" but the PR changes %s%s. Run a code '
+                                     'review on head %s and replace the line with "%s".' % (
+                                         ", ".join(code[:3]), " and more" if len(code) > 3 else "", short, want))
+                  return True, "Docs only: every changed file is docs."
+              stale = [m.group(1) for m in (REVIEWED_AT.search(line) for line in lines if REVIEWER.search(line))
+                       if m and not head.startswith(m.group(1).lower())]
+              if stale:
+                  return False, ("The Code review line is for %s, but the PR head is now %s: commits landed after the "
+                                 'review. Review the head again and update the line to "%s".' % (stale[-1][:7], short, want))
+              return False, ('The PR body has no Code review line for head %s. Run a code review on the head (the '
+                             'feature-dev:code-reviewer agent or /code-review; a design or UX review doesn\'t count), fix '
+                             'what it finds, then add "%s". A docs-only PR says "Code review: n.a., docs only".'
+                             % (short, want))
+
+
+          def gh(path, *flags):
+              r = subprocess.run(["gh", "api", path] + list(flags), capture_output=True, text=True)
+              if r.returncode:
+                  raise RuntimeError("gh api %s failed: %s" % (path, (r.stderr or r.stdout).strip()))
+              return r.stdout
+
+
+          def main():
+              repo, number = os.environ["REPO"], os.environ["PR_NUMBER"]
+              pr = json.loads(gh("repos/%s/pulls/%s" % (repo, number)))
+              event_sha = os.environ.get("EVENT_SHA", "")
+              if event_sha and event_sha != pr["head"]["sha"]:  # this run's status belongs to another commit
+                  print("::error title=Code review line::This run is for %s but the PR head is %s; push or edit the PR for a fresh run."
+                        % (event_sha[:7], pr["head"]["sha"][:7]))
+                  sys.exit(1)
+              files = None
+              try:
+                  out = gh("repos/%s/pulls/%s/files?per_page=100" % (repo, number), "--paginate",
+                           "--jq", ".[] | [.filename, .previous_filename] | @json")
+                  files = [tuple(json.loads(line)) for line in out.splitlines() if line.strip()]
+                  if len(files) >= 3000:  # the API stops listing at 3000: not the whole diff
+                      files = None
+              except Exception as e:
+                  print("::warning::couldn't read the changed files: %s" % e)
+              ok, message = check(pr.get("body"), pr["head"]["sha"], files)
+              if not ok:
+                  print("::error title=Code review line::%s" % message)
+              print(message)
+              sys.exit(0 if ok else 1)
+
+
+          if __name__ == "__main__":
+              main()
+          PY
