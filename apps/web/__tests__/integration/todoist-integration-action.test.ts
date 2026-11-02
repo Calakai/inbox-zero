@@ -157,6 +157,8 @@ describe.skipIf(!RUN_INTEGRATION_TESTS)(
           userId: "test-user-id",
         },
         logger: createTestLogger(),
+        // #43 holds webhook and integration actions until the user approves
+        approved: true,
       });
 
       expect(emulator.addedTasks).toHaveLength(1);
@@ -207,6 +209,8 @@ describe.skipIf(!RUN_INTEGRATION_TESTS)(
           userId: "test-user-id",
         },
         logger: createTestLogger(),
+        // #43 holds webhook and integration actions until the user approves
+        approved: true,
       });
 
       expect(emulator.addedTasks).toHaveLength(1);
@@ -235,6 +239,8 @@ describe.skipIf(!RUN_INTEGRATION_TESTS)(
           userId: "test-user-id",
         },
         logger: createTestLogger(),
+        // #43 holds webhook and integration actions until the user approves
+        approved: true,
       });
 
       expect(emulator.addedTasks).toHaveLength(0);

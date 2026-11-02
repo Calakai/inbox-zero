@@ -11,7 +11,7 @@
     "test": "turbo run test --filter=./apps/web -- --run",
     "test-db": "pnpm --filter inbox-zero-ai test-db",
     "test-integration": "pnpm --filter inbox-zero-ai test-integration",
-    "test:packages": "pnpm -r --filter '!inbox-zero-ai' --if-present test",
+    "test:packages": "pnpm -r --workspace-concurrency=1 --filter '!inbox-zero-ai' --if-present test",
     "typecheck:packages": "pnpm -r --filter '!inbox-zero-ai' --if-present typecheck",
     "lint": "turbo lint",
     "postinstall": "sh clone-marketing.sh",
